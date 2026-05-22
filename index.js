@@ -73,11 +73,15 @@ const SCRUB_RE = [
     /&lt;gq_fail&gt;[\s\S]*?&lt;\/gq_fail&gt;/gi,
     /&lt;gq_reward&gt;[\s\S]*?&lt;\/gq_reward&gt;/gi,
     /&lt;gq_rep&gt;[\s\S]*?&lt;\/gq_rep&gt;/gi,
+    // Raw JSON guild board that leaks as plain text
+    /\{"guild"\s*:\s*"[^"]*"\s*,\s*"(?:loc|rank|quests)"[\s\S]{10,800}?"quests"\s*:\s*\[[\s\S]*?\]\s*\}/gi,
 ];
 // Raw bracket markup that leaks into chat
 const SCRUB_BRACKET = [
     /\[Guild\|[^\]\r\n]{1,200}\]/g,
     /\[Q\d+\|[^\]\r\n]{1,400}\]/g,
+    // System Note prompt that leaks
+    /\[System Note:[\s\S]{0,2000}?guild[\s\S]{0,2000}?\]/gi,
 ];
 
 // ── State ──
@@ -107,7 +111,21 @@ function getProfile(){
 function saveProfile(p){jSave(KEY_PROFILE,p);}
 function calcRank(p){var r='F';for(var i=0;i<RANKS.length;i++)if(p.completed>=RANK_TH[RANKS[i]])r=RANKS[i];return r;}
 function defUI(){return{fab:{x:null,y:null},panel:{x:null,y:null,w:null,h:null}};}
-function defExtraApi(){return{enabled:false,url:'',key:'',model:'',headers:{}};}
+function defExtraApi(){return{enabled:false,url:'',key:'',model:'',proxy:'',maxTokens:800,headers:{}};}
+const EXTRA_MODELS = [
+    {id:'gpt-4o-mini',name:'GPT-4o Mini'},
+    {id:'gpt-4o',name:'GPT-4o'},
+    {id:'gpt-4-turbo',name:'GPT-4 Turbo'},
+    {id:'gpt-3.5-turbo',name:'GPT-3.5 Turbo'},
+    {id:'claude-3-haiku-20240307',name:'Claude 3 Haiku'},
+    {id:'claude-3-5-sonnet-20241022',name:'Claude 3.5 Sonnet'},
+    {id:'gemini-1.5-flash',name:'Gemini 1.5 Flash'},
+    {id:'gemini-1.5-pro',name:'Gemini 1.5 Pro'},
+    {id:'mistral-small-latest',name:'Mistral Small'},
+    {id:'mistral-large-latest',name:'Mistral Large'},
+    {id:'command-r',name:'Cohere Command R'},
+    {id:'custom',name:'Своя модель (ввести вручную)'},
+];
 function normExtraApi(c){
     var d=defExtraApi();
     if(!c||typeof c!=='object')return d;
@@ -115,6 +133,8 @@ function normExtraApi(c){
     d.url=String(c.url||'').trim();
     d.key=String(c.key||'').trim();
     d.model=String(c.model||'').trim();
+    d.proxy=String(c.proxy||'').trim();
+    d.maxTokens=typeof c.maxTokens==='number'?c.maxTokens:800;
     d.headers=(c.headers&&typeof c.headers==='object')?c.headers:{};
     return d;
 }
@@ -272,12 +292,13 @@ function parseDoneListFromAny(raw){
 async function fetchExtraApi(payload){
     var cfg=getExtraApi();
     if(!cfg.enabled||!cfg.url)return null;
+    var endpoint=cfg.proxy?cfg.proxy:cfg.url;
     var headers={'Content-Type':'application/json'};
     if(cfg.key){headers.Authorization='Bearer '+cfg.key;headers['X-API-Key']=cfg.key;}
     for(var hk in cfg.headers){if(cfg.headers[hk]!=null)headers[String(hk)]=String(cfg.headers[hk]);}
-    var body={model:cfg.model||undefined,input:payload,payload:payload,task:payload&&payload.task?payload.task:undefined};
+    var body={model:cfg.model||undefined,max_tokens:cfg.maxTokens||800,input:payload,payload:payload,task:payload&&payload.task?payload.task:undefined};
     try{
-        var res=await fetch(cfg.url,{method:'POST',headers:headers,body:JSON.stringify(body)});
+        var res=await fetch(endpoint,{method:'POST',headers:headers,body:JSON.stringify(body)});
         if(!res.ok)return null;
         var txt=await res.text();
         return tryJSON(txt)||txt;
@@ -288,10 +309,12 @@ async function requestBoardFromExtraApi(){
     if(!cfg.enabled||!cfg.url)return false;
     var ctx=null;
     try{if(typeof SillyTavern!=='undefined'&&SillyTavern.getContext)ctx=SillyTavern.getContext();else if(typeof getContext==='function')ctx=getContext();}catch(e){}
-    var chat=(ctx&&Array.isArray(ctx.chat)?ctx.chat:[]).slice(-16).map(function(m){
-        return{role:m&&m.is_user?'user':'assistant',text:String((m&&m.mes)||'')};
+    // Token economy: send only last 6 messages, trimmed to 200 chars each
+    var chat=(ctx&&Array.isArray(ctx.chat)?ctx.chat:[]).slice(-6).map(function(m){
+        var t=String((m&&m.mes)||'').slice(0,200);
+        return{role:m&&m.is_user?'user':'assistant',text:t};
     });
-    var payload={task:'generate_guild_board',profile:getProfile(),chat:chat,active:_active};
+    var payload={task:'generate_guild_board',profile:{rank:getProfile().rank,completed:getProfile().completed,gold:getProfile().gold},chat:chat,active:_active?{title:_active.title,type:_active.type}:null};
     var raw=await fetchExtraApi(payload);
     if(!raw)return false;
     var board=null;
@@ -312,7 +335,9 @@ async function requestBoardFromExtraApi(){
 async function trackObjectivesByExtraApi(text){
     var cfg=getExtraApi();
     if(!cfg.enabled||!cfg.url||!_active||!text)return false;
-    var payload={task:'track_guild_objectives',activeQuest:_active,message:String(text||'')};
+    // Token economy: send only objective texts and trimmed message (300 chars max)
+    var objs=(_active.objs||[]).map(function(o){return{text:o.text,done:o.done};});
+    var payload={task:'track_guild_objectives',objectives:objs,message:String(text||'').slice(0,300)};
     var raw=await fetchExtraApi(payload);
     if(!raw)return false;
     var done=parseDoneListFromAny(raw);
@@ -560,6 +585,7 @@ function createUI(){
         +'<div class="gq-tab" data-tab="active"><i class="fa-solid fa-crosshairs"></i> Задание</div>'
         +'<div class="gq-tab" data-tab="profile"><i class="fa-solid fa-user"></i> Профиль</div>'
         +'<div class="gq-tab" data-tab="achievements"><i class="fa-solid fa-trophy"></i> Достижения</div>'
+        +'<div class="gq-tab" data-tab="settings"><i class="fa-solid fa-gear"></i> API</div>'
         +'<button class="gq-close" id="gq-close" title="Закрыть">\u2715</button>'
         +'</div>'
         +'<div class="gq-content">'
@@ -567,6 +593,7 @@ function createUI(){
         +'<div class="gq-view" data-view="active" id="gq-v-active"></div>'
         +'<div class="gq-view" data-view="profile" id="gq-v-profile"></div>'
         +'<div class="gq-view" data-view="achievements" id="gq-v-achs"></div>'
+        +'<div class="gq-view" data-view="settings" id="gq-v-settings"></div>'
         +'</div>'
         +'<div class="gq-resize" id="gq-resize" title="Изменить размер"></div>';
     panel.addEventListener('click',function(e){e.stopPropagation();});
@@ -607,6 +634,7 @@ function refreshTab(){
     else if(_curTab==='active')renderActive();
     else if(_curTab==='profile')renderProfile();
     else if(_curTab==='achievements')renderAchs();
+    else if(_curTab==='settings')renderSettings();
 }
 
 function updateBadge(){
@@ -816,6 +844,119 @@ function renderAchs(){
             };
         })(items[k]);
     }
+}
+
+// ── Render: Settings (Extra API) ──
+function renderSettings(){
+    var el=document.getElementById('gq-v-settings');if(!el)return;
+    var cfg=getExtraApi();
+    var modelOpts='';
+    var foundModel=false;
+    for(var i=0;i<EXTRA_MODELS.length;i++){
+        var m=EXTRA_MODELS[i];
+        var sel=(cfg.model===m.id);
+        if(sel)foundModel=true;
+        modelOpts+='<option value="'+esc(m.id)+'"'+(sel?' selected':'')+'>'+esc(m.name)+'</option>';
+    }
+    // If custom model not in list
+    if(cfg.model&&!foundModel){
+        modelOpts+='<option value="'+esc(cfg.model)+'" selected>'+esc(cfg.model)+' (своя)</option>';
+    }
+
+    el.innerHTML='<div class="gq-settings">'
+        +'<div class="gq-section-title"><i class="fa-solid fa-robot"></i> Extra API — Внешний ИИ</div>'
+        +'<div class="gq-set-desc">Подключи внешний ИИ для генерации заданий и автоматической проверки целей. Модель читает минимум контекста для экономии токенов.</div>'
+        +'<label class="gq-set-toggle">'
+        +'<input type="checkbox" id="gq-set-enabled"'+(cfg.enabled?' checked':'')+'>'
+        +'<span class="gq-set-toggle-label">Включить Extra API</span>'
+        +'</label>'
+        +'<div class="gq-set-group">'
+        +'<label class="gq-set-label">API URL (эндпоинт)</label>'
+        +'<input type="text" class="gq-set-input" id="gq-set-url" value="'+esc(cfg.url)+'" placeholder="https://api.openai.com/v1/chat/completions">'
+        +'</div>'
+        +'<div class="gq-set-group">'
+        +'<label class="gq-set-label">Прокси (опционально)</label>'
+        +'<input type="text" class="gq-set-input" id="gq-set-proxy" value="'+esc(cfg.proxy)+'" placeholder="https://my-proxy.example.com/v1">'
+        +'<span class="gq-set-hint">Если указан, запросы пойдут через прокси вместо прямого URL</span>'
+        +'</div>'
+        +'<div class="gq-set-group">'
+        +'<label class="gq-set-label">API Ключ</label>'
+        +'<input type="password" class="gq-set-input" id="gq-set-key" value="'+esc(cfg.key)+'" placeholder="sk-...">'
+        +'</div>'
+        +'<div class="gq-set-group">'
+        +'<label class="gq-set-label">Модель ИИ</label>'
+        +'<select class="gq-set-input" id="gq-set-model">'+modelOpts+'</select>'
+        +'</div>'
+        +'<div class="gq-set-group" id="gq-set-custom-model-wrap" style="display:'+(cfg.model==='custom'||(!foundModel&&cfg.model)?'block':'none')+'">'
+        +'<label class="gq-set-label">Имя модели (вручную)</label>'
+        +'<input type="text" class="gq-set-input" id="gq-set-custom-model" value="'+esc(cfg.model==='custom'?'':cfg.model)+'" placeholder="my-model-name">'
+        +'</div>'
+        +'<div class="gq-set-group">'
+        +'<label class="gq-set-label">Макс. токенов ответа</label>'
+        +'<input type="number" class="gq-set-input" id="gq-set-tokens" value="'+(cfg.maxTokens||800)+'" min="100" max="4000" step="100">'
+        +'<span class="gq-set-hint">Чем меньше — тем экономнее. 800 достаточно для заданий.</span>'
+        +'</div>'
+        +'<div class="gq-section-title" style="margin-top:14px"><i class="fa-solid fa-list-check"></i> Возможности ИИ</div>'
+        +'<div class="gq-set-features">'
+        +'<label class="gq-set-toggle"><input type="checkbox" checked disabled><span class="gq-set-toggle-label">Генерация заданий на доску</span></label>'
+        +'<label class="gq-set-toggle"><input type="checkbox" checked disabled><span class="gq-set-toggle-label">Автопроверка целей (чекбоксы)</span></label>'
+        +'<label class="gq-set-toggle"><input type="checkbox" checked disabled><span class="gq-set-toggle-label">Экономный режим (мин. контекст)</span></label>'
+        +'</div>'
+        +'<div class="gq-set-actions">'
+        +'<button class="gq-btn gq-btn-save" id="gq-set-save"><i class="fa-solid fa-floppy-disk"></i> Сохранить</button>'
+        +'<button class="gq-btn gq-btn-test" id="gq-set-test"><i class="fa-solid fa-vial"></i> Тест соединения</button>'
+        +'</div>'
+        +'<div id="gq-set-status" class="gq-set-status"></div>'
+        +'</div>';
+
+    // Model select change → show/hide custom input
+    var selModel=document.getElementById('gq-set-model');
+    var customWrap=document.getElementById('gq-set-custom-model-wrap');
+    if(selModel)selModel.addEventListener('change',function(){
+        if(customWrap)customWrap.style.display=(selModel.value==='custom')?'block':'none';
+    });
+
+    // Save
+    var saveBtn=document.getElementById('gq-set-save');
+    if(saveBtn)saveBtn.addEventListener('click',function(){
+        var selVal=document.getElementById('gq-set-model').value;
+        var customVal=(document.getElementById('gq-set-custom-model')||{}).value||'';
+        var model=(selVal==='custom')?customVal.trim():selVal;
+        var newCfg={
+            enabled:document.getElementById('gq-set-enabled').checked,
+            url:(document.getElementById('gq-set-url').value||'').trim(),
+            proxy:(document.getElementById('gq-set-proxy').value||'').trim(),
+            key:(document.getElementById('gq-set-key').value||'').trim(),
+            model:model,
+            maxTokens:parseInt(document.getElementById('gq-set-tokens').value,10)||800,
+            headers:cfg.headers
+        };
+        saveExtraApi(newCfg);
+        toast('\u2713 Extra API настройки сохранены','success');
+        var st=document.getElementById('gq-set-status');
+        if(st){st.textContent='\u2713 Сохранено';st.className='gq-set-status gq-set-ok';}
+    });
+
+    // Test
+    var testBtn=document.getElementById('gq-set-test');
+    if(testBtn)testBtn.addEventListener('click',async function(){
+        var st=document.getElementById('gq-set-status');
+        if(st){st.textContent='\u23F3 Проверка...';st.className='gq-set-status';}
+        // Save first
+        saveBtn.click();
+        var cfg2=getExtraApi();
+        if(!cfg2.url){if(st){st.textContent='\u2717 Укажите URL';st.className='gq-set-status gq-set-err';}return;}
+        try{
+            var result=await fetchExtraApi({task:'ping',test:true});
+            if(result!==null){
+                if(st){st.textContent='\u2713 Соединение успешно!';st.className='gq-set-status gq-set-ok';}
+            }else{
+                if(st){st.textContent='\u2717 Нет ответа или ошибка';st.className='gq-set-status gq-set-err';}
+            }
+        }catch(e){
+            if(st){st.textContent='\u2717 Ошибка: '+String(e.message||e);st.className='gq-set-status gq-set-err';}
+        }
+    });
 }
 
 // ── Quest Actions ──
