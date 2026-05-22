@@ -78,7 +78,11 @@ const SCRUB_RE = [
     // Broader: any object starting with "guild" key followed by "quests" array
     /\{\s*(?:\u{fffd}\s*)?[""]guild[""]\s*:[\s\S]{5,5000}?[""]quests[""]\s*:\s*\[[\s\S]*?\]\s*\}/giu,
     // Escaped unicode markers (\ufffd or replacement chars) mixed with JSON
-    /\{\s*\ufffd[^}]{10,5000}quests[^}]{10,5000}\}/gi,
+    /\{\s*\ufffd[^}]{10,5000}(?:quests|objs)[^}]{0,5000}\}/gi,
+    // Individual quest JSON objects with "title" + "objs" keys (any quote style)
+    /\{\s*(?:&quot;|\u201c|\u201d|"|&#34;|[\ufffd])?\s*title\s*(?:&quot;|\u201c|\u201d|"|&#34;|[\ufffd])?\s*:[\s\S]{10,2000}?objs[\s\S]{0,200}?\[[^\]]*\]\s*\}/gi,
+    // Comma-separated sequence of quest objects: {...},...{...}
+    /(?:\{\s*(?:"|&quot;|[\ufffd\u201c\u201d])?\s*title[\s\S]{10,2000}?objs[\s\S]{0,500}?\]\s*\}\s*,?\s*){2,}/gi,
 ];
 // Raw bracket markup that leaks into chat
 const SCRUB_BRACKET = [
@@ -415,7 +419,22 @@ function parseBoard(text){
         var inner=(m[1]||'').trim();
         var i=inner.indexOf('{'),j=inner.lastIndexOf('}');
         if(i>=0&&j>i){var d=tryJSON(inner.slice(i,j+1));if(d&&Array.isArray(d.quests))return normBoard(d);}
+        // Try parsing as array of quest objects inside guild_board
+        if(i>=0&&j>i){
+            var arrStr='['+inner.slice(i,j+1)+']';
+            var arr=tryJSON(arrStr);
+            if(arr&&Array.isArray(arr)&&arr.length&&arr[0].title)return normBoard({quests:arr});
+        }
         var leg=parseLegacy(inner);if(leg)return leg;
+    }
+    // Try bare quest objects/array outside of tags
+    var bareArr=text.match(/\[\s*\{\s*"title"[\s\S]*?\}\s*\]/);
+    if(bareArr){var parsed=tryJSON(bareArr[0]);if(parsed&&Array.isArray(parsed)&&parsed.length&&parsed[0].title)return normBoard({quests:parsed});}
+    // Try comma-separated quest objects
+    var questObjs=text.match(/\{\s*"title"\s*:\s*"[^"]*"[\s\S]*?"objs"\s*:\s*\[[^\]]*\]\s*\}/g);
+    if(questObjs&&questObjs.length){
+        var qs=[];for(var qi=0;qi<questObjs.length;qi++){var qp=tryJSON(questObjs[qi]);if(qp&&qp.title)qs.push(qp);}
+        if(qs.length)return normBoard({quests:qs});
     }
     return parseLegacy(text);
 }
@@ -470,6 +489,8 @@ function scrubChat(){
         h=h.replace(/```(?:json|xml|txt)?\s*(?:<guild_board>[\s\S]*?<\/guild_board>|\[Guild\|[\s\S]*?\])\s*```/gi,function(){touched=true;return '';});
         // Catch any remaining raw JSON-like guild data with various quote styles
         h=h.replace(/\{\s*(?:&quot;|\u201c|\u201d|"|&#34;|[\ufffd])\s*(?:guild|title|quests)[\s\S]{20,5000}?(?:quests|objs)\s*(?:&quot;|\u201c|\u201d|"|&#34;|[\ufffd])\s*:\s*\[[\s\S]*?\]\s*\}/gi,function(){touched=true;return '';});
+        // Catch individual quest objects with title+objs (common AI leak pattern)
+        h=h.replace(/\{\s*(?:&quot;|\u201c|\u201d|"|&#34;|[\ufffd])?\s*title\s*(?:&quot;|\u201c|\u201d|"|&#34;|[\ufffd])?\s*:[\s\S]{10,2000}?objs[\s\S]{0,200}?\[[^\]]*\]\s*\}/gi,function(){touched=true;return '';});
         // Catch raw text blocks that look like JSON quest dumps (with replacement char)
         h=h.replace(/\{\s*\ufffd\s*(?:&quot;|"|[\u201c\u201d])[\s\S]{20,5000}?\]\s*\}(?:\s*,?\s*\{[\s\S]{20,5000}?\]\s*\})*/gi,function(){touched=true;return '';});
         // Ultra-broad: any block starting with { and containing "guild" + "quests" pattern (any quote chars)
@@ -478,8 +499,9 @@ function scrubChat(){
         h=h.replace(/\{\s*[\ufffd\u{fffd}]\s*[^{}]{0,30}guild[\s\S]{10,8000}?\]\s*\}/giu,function(){touched=true;return '';});
         // Fallback: any visible text containing "guild" : "..." , "quests" : [ pattern
         h=h.replace(/\{\s*.{0,5}guild.{0,5}\s*:\s*.{0,5}[^\n]{3,100}.{0,5}quests.{0,5}\s*:\s*\[[\s\S]*?\]\s*\}/gi,function(){touched=true;return '';});
-        // Clean empty paragraphs left behind
+        // Clean empty paragraphs and stray commas left behind
         h=h.replace(/<p>\s*<\/p>/gi,'');
+        if(touched) h=h.replace(/^\s*[,\s]+\s*$/g,'').replace(/(?:^|\n)\s*,\s*(?:\n|$)/g,'\n');
         if(h!==orig) el.innerHTML=h;
     }
 }
