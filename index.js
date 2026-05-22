@@ -124,15 +124,44 @@ function chatKey(base){
     return id?(base+'_'+id):base;
 }
 
-// ── Profile ──
-function defProfile(){return{name:'Авантюрист',rank:'F',gold:0,completed:0,failed:0,byType:{},history:[],reputation:{},titles:[],activeTitle:'',achievements:[]};}
+// ── Profile (per-chat) ──
+function defProfile(){return{name:'Авантюрист',avatar:'',rank:'F',gold:0,completed:0,failed:0,byType:{},history:[],reputation:{},titles:[],activeTitle:'',achievements:[]};}
+function getPersonaInfo(){
+    // Get current persona name and avatar from SillyTavern context
+    try{
+        var ctx=null;
+        if(typeof SillyTavern!=='undefined'&&SillyTavern.getContext)ctx=SillyTavern.getContext();
+        else if(typeof getContext==='function')ctx=getContext();
+        if(!ctx)return null;
+        var name='',avatar='';
+        // User persona
+        if(ctx.name1)name=String(ctx.name1);
+        if(ctx.user_avatar)avatar='/User Avatars/'+String(ctx.user_avatar);
+        // If persona is set via personas system
+        if(typeof ctx.personas==='object'&&ctx.default_persona){
+            var pn=ctx.personas[ctx.default_persona];
+            if(pn)name=String(pn);
+        }
+        return{name:name||'',avatar:avatar||''};
+    }catch(e){return null;}
+}
 function getProfile(){
-    var p=jLoad(KEY_PROFILE,null);
-    if(!p||typeof p.gold!=='number')return defProfile();
+    var p=jLoad(chatKey(KEY_PROFILE),null);
+    // Fallback: try loading legacy global profile
+    if(!p||typeof p.gold!=='number'){
+        p=jLoad(KEY_PROFILE,null);
+    }
+    if(!p||typeof p.gold!=='number')p=defProfile();
     var d=defProfile();for(var k in d)if(p[k]===undefined)p[k]=d[k];
+    // Auto-populate name and avatar from persona if not manually set
+    var persona=getPersonaInfo();
+    if(persona){
+        if((!p.name||p.name==='Авантюрист')&&persona.name)p.name=persona.name;
+        if(!p.avatar&&persona.avatar)p.avatar=persona.avatar;
+    }
     return p;
 }
-function saveProfile(p){jSave(KEY_PROFILE,p);}
+function saveProfile(p){jSave(chatKey(KEY_PROFILE),p);}
 function calcRank(p){var r='F';for(var i=0;i<RANKS.length;i++)if(p.completed>=RANK_TH[RANKS[i]])r=RANKS[i];return r;}
 function defUI(){return{fab:{x:null,y:null},panel:{x:null,y:null,w:null,h:null}};}
 function defExtraApi(){return{enabled:false,url:'',key:'',model:'',maxTokens:800,headers:{}};}
@@ -430,7 +459,6 @@ function normQuest(q){
 // ── Scrub tags from chat ──
 function scrubChat(){
     var msgs=document.querySelectorAll('.mes_text');
-    var marker='<details class="gq-tech-hidden"><summary>⚙ Служебные данные гильдии скрыты</summary></details>';
     for(var i=0;i<msgs.length;i++){
         var el=msgs[i], h=el.innerHTML;
         if(!h)continue;
@@ -444,9 +472,14 @@ function scrubChat(){
         h=h.replace(/\{\s*(?:&quot;|\u201c|\u201d|"|&#34;|[\ufffd])\s*(?:guild|title|quests)[\s\S]{20,5000}?(?:quests|objs)\s*(?:&quot;|\u201c|\u201d|"|&#34;|[\ufffd])\s*:\s*\[[\s\S]*?\]\s*\}/gi,function(){touched=true;return '';});
         // Catch raw text blocks that look like JSON quest dumps (with replacement char)
         h=h.replace(/\{\s*\ufffd\s*(?:&quot;|"|[\u201c\u201d])[\s\S]{20,5000}?\]\s*\}(?:\s*,?\s*\{[\s\S]{20,5000}?\]\s*\})*/gi,function(){touched=true;return '';});
+        // Ultra-broad: any block starting with { and containing "guild" + "quests" pattern (any quote chars)
+        h=h.replace(/\{[^{}]{0,50}(?:guild|гильд)[^{}]{0,200}(?:quests|квест)[\s\S]{10,8000}?\]\s*\}/gi,function(){touched=true;return '';});
+        // Catch JSON with replacement characters (ufffd) surrounding keys - the screenshot pattern
+        h=h.replace(/\{\s*[\ufffd\u{fffd}]\s*[^{}]{0,30}guild[\s\S]{10,8000}?\]\s*\}/giu,function(){touched=true;return '';});
+        // Fallback: any visible text containing "guild" : "..." , "quests" : [ pattern
+        h=h.replace(/\{\s*.{0,5}guild.{0,5}\s*:\s*.{0,5}[^\n]{3,100}.{0,5}quests.{0,5}\s*:\s*\[[\s\S]*?\]\s*\}/gi,function(){touched=true;return '';});
         // Clean empty paragraphs left behind
         h=h.replace(/<p>\s*<\/p>/gi,'');
-        if(touched&&h.indexOf('gq-tech-hidden')===-1)h=marker+h;
         if(h!==orig) el.innerHTML=h;
     }
 }
@@ -807,8 +840,12 @@ function renderProfile(){
         }
     }else{histH='<div class="gq-pempty">\u041D\u0435\u0442 \u0438\u0441\u0442\u043E\u0440\u0438\u0438</div>';}
 
+    var avatarH=p.avatar
+        ?'<div class="gq-pavatar"><img src="'+esc(p.avatar)+'" class="gq-pavatar-img" onerror="this.parentNode.innerHTML=\'⚔\'"></div>'
+        :'<div class="gq-pavatar">\u2694</div>';
+
     el.innerHTML='<div class="gq-profile">'
-        +'<div class="gq-pavatar">\u2694</div>'
+        +avatarH
         +'<div class="gq-pname">'+esc(p.name)+'</div>'
         +(titleName?'<div class="gq-ptitle">\u00AB'+esc(titleName)+'\u00BB</div>':'')
         +'<div class="gq-prank"><span class="gq-rank-badge '+rc+'">\u0420\u0430\u043D\u0433 '+esc(p.rank)+'</span></div>'
@@ -1068,7 +1105,7 @@ function doComplete(autoTurnIn){
 var SYSTEM_PROMPT = '[System Note: \u0418\u0433\u0440\u043E\u043A \u043F\u043E\u0434\u043E\u0448\u0451\u043B \u043A \u0434\u043E\u0441\u043A\u0435 \u043E\u0431\u044A\u044F\u0432\u043B\u0435\u043D\u0438\u0439 \u0433\u0438\u043B\u044C\u0434\u0438\u0438. \u0412 \u0421\u0410\u041C\u041E\u041C \u041D\u0410\u0427\u0410\u041B\u0415 \u043E\u0442\u0432\u0435\u0442\u0430 \u0432\u044B\u0432\u0435\u0434\u0438 \u0431\u043B\u043E\u043A \u0421\u0422\u0420\u041E\u0413\u041E \u0432 \u044D\u0442\u043E\u043C \u0444\u043E\u0440\u043C\u0430\u0442\u0435:\n\n<guild_board>\n{"guild":"\u041D\u0430\u0437\u0432\u0430\u043D\u0438\u0435\u0413\u0438\u043B\u044C\u0434\u0438\u0438","loc":"\u041C\u0435\u0441\u0442\u043E","rank":"\u0420\u0430\u043D\u0433\u0418\u0433\u0440\u043E\u043A\u0430","quests":[\n{"title":"\u041D\u0430\u0437\u0432\u0430\u043D\u0438\u0435","desc":"\u041E\u043F\u0438\u0441\u0430\u043D\u0438\u0435","diff":"F","type":"GUILD","reward":"50\u0437\u043C","client":"\u0418\u043C\u044F","deadline":"2 \u0434\u043D\u044F","location":"\u041B\u043E\u043A\u0430\u0446\u0438\u044F","storyLink":false,"objs":["\u0426\u0435\u043B\u044C1","\u0426\u0435\u043B\u044C2"]}\n]}\n</guild_board>\n\n\u041F\u0440\u0430\u0432\u0438\u043B\u0430:\n- \u0420\u0430\u043D\u0433/\u0421\u043B\u043E\u0436\u043D\u043E\u0441\u0442\u044C: F/E/D/C/B/A/S/SS/SSS\n- 3-4 \u0437\u0430\u0434\u0430\u043D\u0438\u044F, \u0441\u043E\u043E\u0442\u0432\u0435\u0442\u0441\u0442\u0432\u0443\u044E\u0449\u0438\u0445 \u0440\u0430\u043D\u0433\u0443 \u0438\u0433\u0440\u043E\u043A\u0430 (\u00B11 \u0440\u0430\u043D\u0433)\n- \u041D\u0430\u0433\u0440\u0430\u0434\u0430: F=30-80\u0437\u043C, E=80-150\u0437\u043C, D=150-300\u0437\u043C, C=300-600\u0437\u043C, B=600-1500\u0437\u043C, A=1500-5000\u0437\u043C, S=5000+\u0437\u043C\n- \u0422\u0438\u043F\u044B \u0437\u0430\u0434\u0430\u043D\u0438\u0439 (type): STORY, GUILD, SIDE, URGENT, HUNT, ESCORT, DUNGEON, INVESTIGATE, SPECIAL, RAID, DAILY\n- \u041E\u0434\u043D\u043E \u0438\u0437 \u0437\u0430\u0434\u0430\u043D\u0438\u0439 \u043C\u043E\u0436\u0435\u0442 \u0431\u044B\u0442\u044C STORY (\u0441\u0432\u044F\u0437\u0430\u043D\u043E \u0441 \u0441\u044E\u0436\u0435\u0442\u043E\u043C RP, storyLink:true)\n- \u0421\u0440\u043E\u0447\u043D\u044B\u0435 (URGENT) \u0434\u0430\u044E\u0442 x1.5 \u043D\u0430\u0433\u0440\u0430\u0434\u0443\n- objs: 2-4 \u0446\u0435\u043B\u0438 \u043A\u0430\u043A \u043C\u0430\u0441\u0441\u0438\u0432 \u0441\u0442\u0440\u043E\u043A\n- \u0417\u0430\u0434\u0430\u043D\u0438\u044F \u0434\u043E\u043B\u0436\u043D\u044B \u0431\u044B\u0442\u044C \u0440\u0430\u0437\u043D\u043E\u043E\u0431\u0440\u0430\u0437\u043D\u044B\u043C\u0438 \u0438 \u0438\u043D\u0442\u0435\u0440\u0435\u0441\u043D\u044B\u043C\u0438, \u043A\u0430\u043A \u0432 \u0430\u043D\u0438\u043C\u0435/\u043C\u0430\u043D\u0445\u0432\u0435 \u043F\u0440\u043E \u0433\u0438\u043B\u044C\u0434\u0438\u0438 \u0430\u0432\u0430\u043D\u0442\u044E\u0440\u0438\u0441\u0442\u043E\u0432\n- JSON \u0434\u043E\u043B\u0436\u0435\u043D \u0431\u044B\u0442\u044C \u0432\u0430\u043B\u0438\u0434\u043D\u044B\u043C\n\n\u041A\u043E\u0433\u0434\u0430 \u0438\u0433\u0440\u043E\u043A \u0432\u044B\u043F\u043E\u043B\u043D\u044F\u0435\u0442 \u0446\u0435\u043B\u044C \u0430\u043A\u0442\u0438\u0432\u043D\u043E\u0433\u043E \u0437\u0430\u0434\u0430\u043D\u0438\u044F, \u043F\u043E\u043C\u0435\u0442\u044C:\n<gq_done>\u0442\u043E\u0447\u043D\u044B\u0439 \u0442\u0435\u043A\u0441\u0442 \u0446\u0435\u043B\u0438</gq_done>\n\n\u041F\u043E\u0441\u043B\u0435 </guild_board> \u2014 \u043E\u0431\u044B\u0447\u043D\u043E\u0435 \u043F\u043E\u0432\u0435\u0441\u0442\u0432\u043E\u0432\u0430\u043D\u0438\u0435.]';
 
 function injectPrompt(){
-    var prompt=SYSTEM_PROMPT+'\n\n[Важно: не используй markdown-код-блоки ``` и не показывай служебные теги в обычном тексте. Блок <guild_board>...</guild_board> должен быть СКРЫТ от пользователя — не выводи JSON напрямую в сообщении.]';
+    var prompt=SYSTEM_PROMPT+'\n\n[КРИТИЧЕСКИ ВАЖНО: Блок <guild_board>...</guild_board> — это СКРЫТЫЕ служебные данные. НИКОГДА не показывай JSON пользователю. Не выводи его в тексте сообщения. Не оборачивай в ``` код-блоки. Не переформатируй и не цитируй содержимое тега. Пиши тег <guild_board> СТРОГО один раз в самом начале, а после закрывающего </guild_board> сразу начинай обычное повествование. JSON внутри тега полностью невидим для пользователя.]';
     var p=getProfile();
     var recent=(p.history||[]).slice(-20).map(function(h){return String(h.title||'').trim();}).filter(Boolean);
     if(recent.length){
