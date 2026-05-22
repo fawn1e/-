@@ -6,6 +6,7 @@ const EXT_ID = 'guild-quest-board';
 const KEY_PROFILE = 'gq6_profile';
 const KEY_ACTIVE = 'gq6_active';
 const KEY_BOARD = 'gq6_board';
+const KEY_COMPLETED = 'gq6_completed';
 
 const RANKS = ['F','E','D','C','B','A','S','SS','SSS'];
 const RANK_TH = {F:0,E:3,D:8,C:18,B:35,A:60,S:100,SS:160,SSS:240};
@@ -79,6 +80,7 @@ const SCRUB_BRACKET = [
 
 // ── State ──
 let _panelOpen = false, _curTab = 'board', _board = null, _active = null;
+let _completed = {};
 let _wantBoard = false, _injected = false;
 
 // ── Helpers ──
@@ -99,10 +101,36 @@ function getProfile(){
 }
 function saveProfile(p){jSave(KEY_PROFILE,p);}
 function calcRank(p){var r='F';for(var i=0;i<RANKS.length;i++)if(p.completed>=RANK_TH[RANKS[i]])r=RANKS[i];return r;}
-function loadState(){_board=jLoad(KEY_BOARD,null);_active=jLoad(KEY_ACTIVE,null);}
+function loadState(){
+    _board=jLoad(KEY_BOARD,null);
+    _active=jLoad(KEY_ACTIVE,null);
+    _completed=jLoad(KEY_COMPLETED,{});
+    if(!_completed||typeof _completed!=='object')_completed={};
+    applyCompletedFilter();
+}
 function saveState(){
     if(_board)jSave(KEY_BOARD,_board);else localStorage.removeItem(KEY_BOARD);
     if(_active)jSave(KEY_ACTIVE,_active);else localStorage.removeItem(KEY_ACTIVE);
+    if(_completed&&Object.keys(_completed).length)jSave(KEY_COMPLETED,_completed);else localStorage.removeItem(KEY_COMPLETED);
+}
+
+function questSig(q){
+    if(!q)return '';
+    return [
+        String(q.title||'').trim().toLowerCase(),
+        String(q.client||'').trim().toLowerCase(),
+        String(q.location||'').trim().toLowerCase(),
+        String(q.deadline||'').trim().toLowerCase(),
+        String(q.type||'GUILD').trim().toUpperCase(),
+        String(q.diff||'F').trim().toUpperCase()
+    ].join('|');
+}
+function applyCompletedFilter(){
+    if(!_board||!Array.isArray(_board.quests))return;
+    _board.quests=_board.quests.filter(function(q){
+        var sig=questSig(q);
+        return sig?!_completed[sig]:true;
+    });
 }
 
 function checkUnlocks(p){
@@ -205,7 +233,10 @@ function autoCheck(text){
         saveState();updateBadge();
         var dn=_active.objs.filter(function(o){return o.done;}).length;
         var tn=_active.objs.length;
-        if(dn===tn&&tn>0)toast('\u2726 Все цели выполнены! Сдай задание \u2192','success');
+        if(dn===tn&&tn>0){
+            doComplete(true);
+            return true;
+        }
         else toast('\u2713 Цель отмечена! ('+dn+'/'+tn+')','info');
         if(_panelOpen&&_curTab==='active')renderActive();
     }
@@ -476,6 +507,10 @@ function renderAchs(){
 
 // ── Quest Actions ──
 function doAccept(quest){
+    var sig=questSig(quest);
+    if(sig&&_board&&Array.isArray(_board.quests)){
+        _board.quests=_board.quests.filter(function(q){return questSig(q)!==sig;});
+    }
     _active=quest;saveState();updateBadge();switchTab('active');
     toast('\u269C \u0417\u0430\u0434\u0430\u043D\u0438\u0435 \u043F\u0440\u0438\u043D\u044F\u0442\u043E!','success');
 }
@@ -483,7 +518,7 @@ function doAbandon(){
     _active=null;saveState();updateBadge();switchTab('board');
     toast('\u2715 \u0417\u0430\u0434\u0430\u043D\u0438\u0435 \u043E\u0442\u043C\u0435\u043D\u0435\u043D\u043E','warn');
 }
-function doComplete(){
+function doComplete(autoTurnIn){
     if(!_active)return;
     var a=_active,gold=pGold(a.reward),rep=RANK_REP[a.diff]||5;
     if(a.type==='URGENT')gold=Math.round(gold*1.5);
@@ -495,8 +530,11 @@ function doComplete(){
     p.rank=calcRank(p);
     var unlocks=checkUnlocks(p);
     saveProfile(p);
+    var sig=questSig(a);
+    if(sig)_completed[sig]=true;
+    applyCompletedFilter();
     _active=null;saveState();updateBadge();
-    toast('\u2726 \u0417\u0430\u0434\u0430\u043D\u0438\u0435 \u0432\u044B\u043F\u043E\u043B\u043D\u0435\u043D\u043E! +'+gold+'\u0437\u043C'+(rep?' +'+rep+'\u2764':''),'success');
+    toast((autoTurnIn?'\u2726 \u0417\u0430\u0434\u0430\u043D\u0438\u0435 \u0430\u0432\u0442\u043E-\u0441\u0434\u0430\u043D\u043E':'\u2726 \u0417\u0430\u0434\u0430\u043D\u0438\u0435 \u0432\u044B\u043F\u043E\u043B\u043D\u0435\u043D\u043E')+'! +'+gold+'\u0437\u043C'+(rep?' +'+rep+'\u2764':''),'success');
     if(unlocks.titles.length)setTimeout(function(){toast('\u2B50 \u041D\u043E\u0432\u044B\u0439 \u0442\u0438\u0442\u0443\u043B: '+unlocks.titles.join(', '),'special');},800);
     if(unlocks.achs.length)setTimeout(function(){toast('\uD83C\uDFC6 \u0414\u043E\u0441\u0442\u0438\u0436\u0435\u043D\u0438\u0435: '+unlocks.achs.join(', '),'special');},1500);
     switchTab('profile');
@@ -506,7 +544,13 @@ function doComplete(){
 var SYSTEM_PROMPT = '[System Note: \u0418\u0433\u0440\u043E\u043A \u043F\u043E\u0434\u043E\u0448\u0451\u043B \u043A \u0434\u043E\u0441\u043A\u0435 \u043E\u0431\u044A\u044F\u0432\u043B\u0435\u043D\u0438\u0439 \u0433\u0438\u043B\u044C\u0434\u0438\u0438. \u0412 \u0421\u0410\u041C\u041E\u041C \u041D\u0410\u0427\u0410\u041B\u0415 \u043E\u0442\u0432\u0435\u0442\u0430 \u0432\u044B\u0432\u0435\u0434\u0438 \u0431\u043B\u043E\u043A \u0421\u0422\u0420\u041E\u0413\u041E \u0432 \u044D\u0442\u043E\u043C \u0444\u043E\u0440\u043C\u0430\u0442\u0435:\n\n<guild_board>\n{"guild":"\u041D\u0430\u0437\u0432\u0430\u043D\u0438\u0435\u0413\u0438\u043B\u044C\u0434\u0438\u0438","loc":"\u041C\u0435\u0441\u0442\u043E","rank":"\u0420\u0430\u043D\u0433\u0418\u0433\u0440\u043E\u043A\u0430","quests":[\n{"title":"\u041D\u0430\u0437\u0432\u0430\u043D\u0438\u0435","desc":"\u041E\u043F\u0438\u0441\u0430\u043D\u0438\u0435","diff":"F","type":"GUILD","reward":"50\u0437\u043C","client":"\u0418\u043C\u044F","deadline":"2 \u0434\u043D\u044F","location":"\u041B\u043E\u043A\u0430\u0446\u0438\u044F","storyLink":false,"objs":["\u0426\u0435\u043B\u044C1","\u0426\u0435\u043B\u044C2"]}\n]}\n</guild_board>\n\n\u041F\u0440\u0430\u0432\u0438\u043B\u0430:\n- \u0420\u0430\u043D\u0433/\u0421\u043B\u043E\u0436\u043D\u043E\u0441\u0442\u044C: F/E/D/C/B/A/S/SS/SSS\n- 3-4 \u0437\u0430\u0434\u0430\u043D\u0438\u044F, \u0441\u043E\u043E\u0442\u0432\u0435\u0442\u0441\u0442\u0432\u0443\u044E\u0449\u0438\u0445 \u0440\u0430\u043D\u0433\u0443 \u0438\u0433\u0440\u043E\u043A\u0430 (\u00B11 \u0440\u0430\u043D\u0433)\n- \u041D\u0430\u0433\u0440\u0430\u0434\u0430: F=30-80\u0437\u043C, E=80-150\u0437\u043C, D=150-300\u0437\u043C, C=300-600\u0437\u043C, B=600-1500\u0437\u043C, A=1500-5000\u0437\u043C, S=5000+\u0437\u043C\n- \u0422\u0438\u043F\u044B \u0437\u0430\u0434\u0430\u043D\u0438\u0439 (type): STORY, GUILD, SIDE, URGENT, HUNT, ESCORT, DUNGEON, INVESTIGATE, SPECIAL, RAID, DAILY\n- \u041E\u0434\u043D\u043E \u0438\u0437 \u0437\u0430\u0434\u0430\u043D\u0438\u0439 \u043C\u043E\u0436\u0435\u0442 \u0431\u044B\u0442\u044C STORY (\u0441\u0432\u044F\u0437\u0430\u043D\u043E \u0441 \u0441\u044E\u0436\u0435\u0442\u043E\u043C RP, storyLink:true)\n- \u0421\u0440\u043E\u0447\u043D\u044B\u0435 (URGENT) \u0434\u0430\u044E\u0442 x1.5 \u043D\u0430\u0433\u0440\u0430\u0434\u0443\n- objs: 2-4 \u0446\u0435\u043B\u0438 \u043A\u0430\u043A \u043C\u0430\u0441\u0441\u0438\u0432 \u0441\u0442\u0440\u043E\u043A\n- \u0417\u0430\u0434\u0430\u043D\u0438\u044F \u0434\u043E\u043B\u0436\u043D\u044B \u0431\u044B\u0442\u044C \u0440\u0430\u0437\u043D\u043E\u043E\u0431\u0440\u0430\u0437\u043D\u044B\u043C\u0438 \u0438 \u0438\u043D\u0442\u0435\u0440\u0435\u0441\u043D\u044B\u043C\u0438, \u043A\u0430\u043A \u0432 \u0430\u043D\u0438\u043C\u0435/\u043C\u0430\u043D\u0445\u0432\u0435 \u043F\u0440\u043E \u0433\u0438\u043B\u044C\u0434\u0438\u0438 \u0430\u0432\u0430\u043D\u0442\u044E\u0440\u0438\u0441\u0442\u043E\u0432\n- JSON \u0434\u043E\u043B\u0436\u0435\u043D \u0431\u044B\u0442\u044C \u0432\u0430\u043B\u0438\u0434\u043D\u044B\u043C\n\n\u041A\u043E\u0433\u0434\u0430 \u0438\u0433\u0440\u043E\u043A \u0432\u044B\u043F\u043E\u043B\u043D\u044F\u0435\u0442 \u0446\u0435\u043B\u044C \u0430\u043A\u0442\u0438\u0432\u043D\u043E\u0433\u043E \u0437\u0430\u0434\u0430\u043D\u0438\u044F, \u043F\u043E\u043C\u0435\u0442\u044C:\n<gq_done>\u0442\u043E\u0447\u043D\u044B\u0439 \u0442\u0435\u043A\u0441\u0442 \u0446\u0435\u043B\u0438</gq_done>\n\n\u041F\u043E\u0441\u043B\u0435 </guild_board> \u2014 \u043E\u0431\u044B\u0447\u043D\u043E\u0435 \u043F\u043E\u0432\u0435\u0441\u0442\u0432\u043E\u0432\u0430\u043D\u0438\u0435.]';
 
 function injectPrompt(){
-    setExtensionPrompt(EXT_ID,SYSTEM_PROMPT,extension_prompt_types.IN_CHAT,0,true,false,null,extension_prompt_roles.SYSTEM);
+    var prompt=SYSTEM_PROMPT;
+    var p=getProfile();
+    var recent=(p.history||[]).slice(-20).map(function(h){return String(h.title||'').trim();}).filter(Boolean);
+    if(recent.length){
+        prompt+='\n\n[Доп. правило: не предлагай повторно уже выполненные задания с названиями: '+recent.join('; ')+']';
+    }
+    setExtensionPrompt(EXT_ID,prompt,extension_prompt_types.IN_CHAT,0,true,false,null,extension_prompt_roles.SYSTEM);
     _injected=true;
     console.log('[GQ6] Prompt injected');
 }
@@ -550,7 +594,7 @@ function processNew(){
     var text=last.mes;
     var board=parseBoard(text);
     if(board&&board.quests.length){
-        _board=board;saveBoardState();
+        _board=board;applyCompletedFilter();saveState();
         if(!_panelOpen){openPanel();switchTab('board');}else renderBoard();
     }
     autoCheck(text);
