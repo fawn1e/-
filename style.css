@@ -309,6 +309,10 @@
     background: linear-gradient(135deg, rgba(30,25,40,.9), rgba(20,15,30,.9));
     display: flex; align-items: center; justify-content: center;
     margin: 10px auto 10px; font-size: 36px;
+    overflow: hidden;
+}
+.gq-pavatar-img {
+    width: 100%; height: 100%; object-fit: cover; border-radius: 50%;
 }
 .gq-pname {
     font-family: 'Cinzel', serif; font-size: 18px; font-weight: 700;
@@ -450,16 +454,17 @@
 
 /* Hidden technical payload marker in chat */
 .gq-tech-hidden {
-    margin: 6px 0;
-    opacity: .8;
-    font-size: 12px;
+    display: none !important;
+    height: 0; width: 0; overflow: hidden;
+    position: absolute; pointer-events: none;
 }
-.gq-tech-hidden > summary {
-    cursor: pointer;
-    color: #9aa0a6;
-    list-style: none;
+
+/* Hide guild_board tags via CSS as fallback before JS scrub */
+.mes_text guild_board,
+.mes_text [data-guild-board] {
+    display: none !important;
+    height: 0; width: 0; overflow: hidden;
 }
-.gq-tech-hidden > summary::-webkit-details-marker { display: none; }
 
 /* Empty state */
 .gq-empty {
