@@ -311,6 +311,7 @@ function updateBadge(){
 // ── Render: Board ──
 function renderBoard(){
     var el=document.getElementById('gq-v-board');if(!el)return;
+    applyCompletedFilter();
     if(!_board||!_board.quests.length){
         el.innerHTML='<div class="gq-empty"><i class="fa-solid fa-scroll"></i>'
             +'<div>Доска пуста. Подойди к доске гильдии или нажми кнопку.</div>'
@@ -580,6 +581,7 @@ function scanMessages(){
         var board=parseBoard(msg.mes);
         if(board&&board.quests.length)_board=board;
     }
+    applyCompletedFilter();
     scrubChat();updateBadge();
     if(_panelOpen)refreshTab();
 }
