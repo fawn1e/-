@@ -448,6 +448,19 @@
     to { opacity: 0; transform: translateX(20px); }
 }
 
+/* Hidden technical payload marker in chat */
+.gq-tech-hidden {
+    margin: 6px 0;
+    opacity: .8;
+    font-size: 12px;
+}
+.gq-tech-hidden > summary {
+    cursor: pointer;
+    color: #9aa0a6;
+    list-style: none;
+}
+.gq-tech-hidden > summary::-webkit-details-marker { display: none; }
+
 /* Empty state */
 .gq-empty {
     text-align: center; padding: 30px 20px;

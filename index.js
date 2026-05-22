@@ -8,6 +8,7 @@ const KEY_ACTIVE = 'gq6_active';
 const KEY_BOARD = 'gq6_board';
 const KEY_COMPLETED = 'gq6_completed';
 const KEY_UI = 'gq6_ui';
+const KEY_EXTRA_API = 'gq6_extra_api';
 
 const RANKS = ['F','E','D','C','B','A','S','SS','SSS'];
 const RANK_TH = {F:0,E:3,D:8,C:18,B:35,A:60,S:100,SS:160,SSS:240};
@@ -83,7 +84,9 @@ const SCRUB_BRACKET = [
 let _panelOpen = false, _curTab = 'board', _board = null, _active = null;
 let _completed = {};
 let _ui = null;
+let _extraApi = null;
 let _wantBoard = false, _injected = false;
+let _lastBoardNoticeSig = '';
 
 // ── Helpers ──
 function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
@@ -104,6 +107,26 @@ function getProfile(){
 function saveProfile(p){jSave(KEY_PROFILE,p);}
 function calcRank(p){var r='F';for(var i=0;i<RANKS.length;i++)if(p.completed>=RANK_TH[RANKS[i]])r=RANKS[i];return r;}
 function defUI(){return{fab:{x:null,y:null},panel:{x:null,y:null,w:null,h:null}};}
+function defExtraApi(){return{enabled:false,url:'',key:'',model:'',headers:{}};}
+function normExtraApi(c){
+    var d=defExtraApi();
+    if(!c||typeof c!=='object')return d;
+    d.enabled=!!c.enabled;
+    d.url=String(c.url||'').trim();
+    d.key=String(c.key||'').trim();
+    d.model=String(c.model||'').trim();
+    d.headers=(c.headers&&typeof c.headers==='object')?c.headers:{};
+    return d;
+}
+function getExtraApi(){
+    if(!_extraApi)_extraApi=normExtraApi(jLoad(KEY_EXTRA_API,defExtraApi()));
+    return _extraApi;
+}
+function saveExtraApi(cfg){
+    _extraApi=normExtraApi(cfg);
+    jSave(KEY_EXTRA_API,_extraApi);
+    return _extraApi;
+}
 function normUI(u){
     var d=defUI();
     if(!u||typeof u!=='object')return d;
@@ -197,6 +220,114 @@ function checkUnlocks(p){
     for(var a of ACHS)if(!p.achievements.includes(a.id)&&a.c(p)){p.achievements.push(a.id);na.push(a.name);}
     return{titles:nt,achs:na};
 }
+function boardSig(board){
+    if(!board||!Array.isArray(board.quests))return '';
+    return (board.guild||'')+'|'+(board.rank||'')+'|'+board.quests.map(function(q){
+        return [q.title,q.diff,q.type,q.reward,q.client,q.deadline,q.location].join('#');
+    }).join('|');
+}
+function notifyDesktop(title,body){
+    try{
+        if(!('Notification' in window))return;
+        if(Notification.permission!=='granted')return;
+        new Notification(title||'Guild Quest', {body:String(body||'')});
+    }catch(e){}
+}
+function notify(text,type,desktopTitle){
+    toast(text,type);
+    notifyDesktop(desktopTitle||'Guild Quest',text);
+}
+function notifyBoardAvailable(board){
+    if(!board||!Array.isArray(board.quests)||!board.quests.length)return;
+    var sig=boardSig(board);
+    if(sig&&sig===_lastBoardNoticeSig)return;
+    _lastBoardNoticeSig=sig||_lastBoardNoticeSig;
+    notify('📜 Доступно заданий: '+board.quests.length,'info','Новые задания гильдии');
+}
+function applyBoard(board,opts){
+    if(!board||!board.quests||!board.quests.length)return false;
+    _board=board;
+    applyCompletedFilter();
+    saveState();
+    if(!(opts&&opts.silent))notifyBoardAvailable(_board);
+    if(!_panelOpen){openPanel();switchTab('board');}else renderBoard();
+    updateBadge();
+    return true;
+}
+function parseDoneListFromAny(raw){
+    if(!raw)return [];
+    var out=[],s=String(raw||''),m;
+    try{
+        var j=typeof raw==='string'?tryJSON(raw):raw;
+        if(j&&typeof j==='object'){
+            var arr=Array.isArray(j.done)?j.done:(Array.isArray(j.objectives)?j.objectives:[]);
+            for(var i=0;i<arr.length;i++)if(arr[i])out.push(String(arr[i]).trim());
+            return out.filter(Boolean);
+        }
+    }catch(e){}
+    var re=new RegExp(DONE_RE.source,'gi');
+    while((m=re.exec(s))!==null){if((m[1]||'').trim())out.push((m[1]||'').trim());}
+    return out.filter(Boolean);
+}
+async function fetchExtraApi(payload){
+    var cfg=getExtraApi();
+    if(!cfg.enabled||!cfg.url)return null;
+    var headers={'Content-Type':'application/json'};
+    if(cfg.key){headers.Authorization='Bearer '+cfg.key;headers['X-API-Key']=cfg.key;}
+    for(var hk in cfg.headers){if(cfg.headers[hk]!=null)headers[String(hk)]=String(cfg.headers[hk]);}
+    var body={model:cfg.model||undefined,input:payload,payload:payload,task:payload&&payload.task?payload.task:undefined};
+    try{
+        var res=await fetch(cfg.url,{method:'POST',headers:headers,body:JSON.stringify(body)});
+        if(!res.ok)return null;
+        var txt=await res.text();
+        return tryJSON(txt)||txt;
+    }catch(e){return null;}
+}
+async function requestBoardFromExtraApi(){
+    var cfg=getExtraApi();
+    if(!cfg.enabled||!cfg.url)return false;
+    var ctx=null;
+    try{if(typeof SillyTavern!=='undefined'&&SillyTavern.getContext)ctx=SillyTavern.getContext();else if(typeof getContext==='function')ctx=getContext();}catch(e){}
+    var chat=(ctx&&Array.isArray(ctx.chat)?ctx.chat:[]).slice(-16).map(function(m){
+        return{role:m&&m.is_user?'user':'assistant',text:String((m&&m.mes)||'')};
+    });
+    var payload={task:'generate_guild_board',profile:getProfile(),chat:chat,active:_active};
+    var raw=await fetchExtraApi(payload);
+    if(!raw)return false;
+    var board=null;
+    if(raw&&typeof raw==='object'&&!Array.isArray(raw)){
+        if(raw.board&&Array.isArray(raw.board.quests))board=normBoard(raw.board);
+        else if(raw.guild&&Array.isArray(raw.quests))board=normBoard(raw);
+        else if(raw.output_text)board=parseBoard(String(raw.output_text||''));
+        else if(raw.text)board=parseBoard(String(raw.text||''));
+    }else board=parseBoard(String(raw||''));
+    if(board&&board.quests&&board.quests.length){
+        applyBoard(board);
+        _wantBoard=false;
+        if(_injected)clearPrompt();
+        return true;
+    }
+    return false;
+}
+async function trackObjectivesByExtraApi(text){
+    var cfg=getExtraApi();
+    if(!cfg.enabled||!cfg.url||!_active||!text)return false;
+    var payload={task:'track_guild_objectives',activeQuest:_active,message:String(text||'')};
+    var raw=await fetchExtraApi(payload);
+    if(!raw)return false;
+    var done=parseDoneListFromAny(raw);
+    if(!done.length)return false;
+    var tagText=done.map(function(d){return'<gq_done>'+d+'</gq_done>';}).join('');
+    return autoCheck(tagText);
+}
+async function requestNotificationPermission(){
+    try{
+        if(!('Notification' in window))return 'unsupported';
+        if(Notification.permission==='granted')return 'granted';
+        if(Notification.permission==='denied')return 'denied';
+        return await Notification.requestPermission();
+    }catch(e){return 'error';}
+}
 
 // ── Parse ──
 function parseBoard(text){
@@ -250,14 +381,19 @@ function normQuest(q){
 // ── Scrub tags from chat ──
 function scrubChat(){
     var msgs=document.querySelectorAll('.mes_text');
+    var marker='<details class="gq-tech-hidden"><summary>⚙ Служебные данные гильдии скрыты</summary></details>';
     for(var i=0;i<msgs.length;i++){
         var el=msgs[i], h=el.innerHTML;
         if(!h)continue;
         var orig=h;
-        for(var r=0;r<SCRUB_RE.length;r++) h=h.replace(SCRUB_RE[r],'');
-        for(var r=0;r<SCRUB_BRACKET.length;r++) h=h.replace(SCRUB_BRACKET[r],'');
+        var touched=false;
+        function mark(){touched=true;return '';}
+        for(var r=0;r<SCRUB_RE.length;r++) h=h.replace(SCRUB_RE[r],mark);
+        for(var r=0;r<SCRUB_BRACKET.length;r++) h=h.replace(SCRUB_BRACKET[r],mark);
+        h=h.replace(/```(?:json|xml|txt)?\s*(?:<guild_board>[\s\S]*?<\/guild_board>|\[Guild\|[\s\S]*?\])\s*```/gi,function(){touched=true;return '';});
         // Clean empty paragraphs left behind
         h=h.replace(/<p>\s*<\/p>/gi,'');
+        if(touched&&h.indexOf('gq-tech-hidden')===-1)h=marker+h;
         if(h!==orig) el.innerHTML=h;
     }
 }
@@ -711,7 +847,7 @@ function doComplete(autoTurnIn){
     if(sig)_completed[sig]=true;
     applyCompletedFilter();
     _active=null;saveState();updateBadge();
-    toast((autoTurnIn?'\u2726 \u0417\u0430\u0434\u0430\u043D\u0438\u0435 \u0430\u0432\u0442\u043E-\u0441\u0434\u0430\u043D\u043E':'\u2726 \u0417\u0430\u0434\u0430\u043D\u0438\u0435 \u0432\u044B\u043F\u043E\u043B\u043D\u0435\u043D\u043E')+'! +'+gold+'\u0437\u043C'+(rep?' +'+rep+'\u2764':''),'success');
+    notify((autoTurnIn?'\u2726 \u0417\u0430\u0434\u0430\u043D\u0438\u0435 \u0430\u0432\u0442\u043E-\u0441\u0434\u0430\u043D\u043E':'\u2726 \u0417\u0430\u0434\u0430\u043D\u0438\u0435 \u0432\u044B\u043F\u043E\u043B\u043D\u0435\u043D\u043E')+'! +'+gold+'\u0437\u043C'+(rep?' +'+rep+'\u2764':''),'success','Задание выполнено');
     if(unlocks.titles.length)setTimeout(function(){toast('\u2B50 \u041D\u043E\u0432\u044B\u0439 \u0442\u0438\u0442\u0443\u043B: '+unlocks.titles.join(', '),'special');},800);
     if(unlocks.achs.length)setTimeout(function(){toast('\uD83C\uDFC6 \u0414\u043E\u0441\u0442\u0438\u0436\u0435\u043D\u0438\u0435: '+unlocks.achs.join(', '),'special');},1500);
     switchTab('profile');
@@ -721,7 +857,7 @@ function doComplete(autoTurnIn){
 var SYSTEM_PROMPT = '[System Note: \u0418\u0433\u0440\u043E\u043A \u043F\u043E\u0434\u043E\u0448\u0451\u043B \u043A \u0434\u043E\u0441\u043A\u0435 \u043E\u0431\u044A\u044F\u0432\u043B\u0435\u043D\u0438\u0439 \u0433\u0438\u043B\u044C\u0434\u0438\u0438. \u0412 \u0421\u0410\u041C\u041E\u041C \u041D\u0410\u0427\u0410\u041B\u0415 \u043E\u0442\u0432\u0435\u0442\u0430 \u0432\u044B\u0432\u0435\u0434\u0438 \u0431\u043B\u043E\u043A \u0421\u0422\u0420\u041E\u0413\u041E \u0432 \u044D\u0442\u043E\u043C \u0444\u043E\u0440\u043C\u0430\u0442\u0435:\n\n<guild_board>\n{"guild":"\u041D\u0430\u0437\u0432\u0430\u043D\u0438\u0435\u0413\u0438\u043B\u044C\u0434\u0438\u0438","loc":"\u041C\u0435\u0441\u0442\u043E","rank":"\u0420\u0430\u043D\u0433\u0418\u0433\u0440\u043E\u043A\u0430","quests":[\n{"title":"\u041D\u0430\u0437\u0432\u0430\u043D\u0438\u0435","desc":"\u041E\u043F\u0438\u0441\u0430\u043D\u0438\u0435","diff":"F","type":"GUILD","reward":"50\u0437\u043C","client":"\u0418\u043C\u044F","deadline":"2 \u0434\u043D\u044F","location":"\u041B\u043E\u043A\u0430\u0446\u0438\u044F","storyLink":false,"objs":["\u0426\u0435\u043B\u044C1","\u0426\u0435\u043B\u044C2"]}\n]}\n</guild_board>\n\n\u041F\u0440\u0430\u0432\u0438\u043B\u0430:\n- \u0420\u0430\u043D\u0433/\u0421\u043B\u043E\u0436\u043D\u043E\u0441\u0442\u044C: F/E/D/C/B/A/S/SS/SSS\n- 3-4 \u0437\u0430\u0434\u0430\u043D\u0438\u044F, \u0441\u043E\u043E\u0442\u0432\u0435\u0442\u0441\u0442\u0432\u0443\u044E\u0449\u0438\u0445 \u0440\u0430\u043D\u0433\u0443 \u0438\u0433\u0440\u043E\u043A\u0430 (\u00B11 \u0440\u0430\u043D\u0433)\n- \u041D\u0430\u0433\u0440\u0430\u0434\u0430: F=30-80\u0437\u043C, E=80-150\u0437\u043C, D=150-300\u0437\u043C, C=300-600\u0437\u043C, B=600-1500\u0437\u043C, A=1500-5000\u0437\u043C, S=5000+\u0437\u043C\n- \u0422\u0438\u043F\u044B \u0437\u0430\u0434\u0430\u043D\u0438\u0439 (type): STORY, GUILD, SIDE, URGENT, HUNT, ESCORT, DUNGEON, INVESTIGATE, SPECIAL, RAID, DAILY\n- \u041E\u0434\u043D\u043E \u0438\u0437 \u0437\u0430\u0434\u0430\u043D\u0438\u0439 \u043C\u043E\u0436\u0435\u0442 \u0431\u044B\u0442\u044C STORY (\u0441\u0432\u044F\u0437\u0430\u043D\u043E \u0441 \u0441\u044E\u0436\u0435\u0442\u043E\u043C RP, storyLink:true)\n- \u0421\u0440\u043E\u0447\u043D\u044B\u0435 (URGENT) \u0434\u0430\u044E\u0442 x1.5 \u043D\u0430\u0433\u0440\u0430\u0434\u0443\n- objs: 2-4 \u0446\u0435\u043B\u0438 \u043A\u0430\u043A \u043C\u0430\u0441\u0441\u0438\u0432 \u0441\u0442\u0440\u043E\u043A\n- \u0417\u0430\u0434\u0430\u043D\u0438\u044F \u0434\u043E\u043B\u0436\u043D\u044B \u0431\u044B\u0442\u044C \u0440\u0430\u0437\u043D\u043E\u043E\u0431\u0440\u0430\u0437\u043D\u044B\u043C\u0438 \u0438 \u0438\u043D\u0442\u0435\u0440\u0435\u0441\u043D\u044B\u043C\u0438, \u043A\u0430\u043A \u0432 \u0430\u043D\u0438\u043C\u0435/\u043C\u0430\u043D\u0445\u0432\u0435 \u043F\u0440\u043E \u0433\u0438\u043B\u044C\u0434\u0438\u0438 \u0430\u0432\u0430\u043D\u0442\u044E\u0440\u0438\u0441\u0442\u043E\u0432\n- JSON \u0434\u043E\u043B\u0436\u0435\u043D \u0431\u044B\u0442\u044C \u0432\u0430\u043B\u0438\u0434\u043D\u044B\u043C\n\n\u041A\u043E\u0433\u0434\u0430 \u0438\u0433\u0440\u043E\u043A \u0432\u044B\u043F\u043E\u043B\u043D\u044F\u0435\u0442 \u0446\u0435\u043B\u044C \u0430\u043A\u0442\u0438\u0432\u043D\u043E\u0433\u043E \u0437\u0430\u0434\u0430\u043D\u0438\u044F, \u043F\u043E\u043C\u0435\u0442\u044C:\n<gq_done>\u0442\u043E\u0447\u043D\u044B\u0439 \u0442\u0435\u043A\u0441\u0442 \u0446\u0435\u043B\u0438</gq_done>\n\n\u041F\u043E\u0441\u043B\u0435 </guild_board> \u2014 \u043E\u0431\u044B\u0447\u043D\u043E\u0435 \u043F\u043E\u0432\u0435\u0441\u0442\u0432\u043E\u0432\u0430\u043D\u0438\u0435.]';
 
 function injectPrompt(){
-    var prompt=SYSTEM_PROMPT;
+    var prompt=SYSTEM_PROMPT+'\n\n[Важно: не используй markdown-код-блоки ``` и не показывай служебные теги в обычном тексте.]';
     var p=getProfile();
     var recent=(p.history||[]).slice(-20).map(function(h){return String(h.title||'').trim();}).filter(Boolean);
     if(recent.length){
@@ -755,7 +891,10 @@ function scanMessages(){
     for(var i=0;i<ctx.chat.length;i++){
         var msg=ctx.chat[i];if(!msg||!msg.mes)continue;
         var board=parseBoard(msg.mes);
-        if(board&&board.quests.length)_board=board;
+        if(board&&board.quests.length){
+            _board=board;
+            _lastBoardNoticeSig=boardSig(board)||_lastBoardNoticeSig;
+        }
     }
     applyCompletedFilter();
     scrubChat();updateBadge();
@@ -772,14 +911,18 @@ function processNew(){
     var text=last.mes;
     var board=parseBoard(text);
     if(board&&board.quests.length){
-        _board=board;applyCompletedFilter();saveState();
-        if(!_panelOpen){openPanel();switchTab('board');}else renderBoard();
+        applyBoard(board);
     }
     autoCheck(text);
+    trackObjectivesByExtraApi(text);
+    scrubChat();
     setTimeout(scrubChat,300);
     _wantBoard=false;
     if(_injected)clearPrompt();
     updateBadge();
+}
+function handleBoardTrigger(){
+    requestBoardFromExtraApi().then(function(ok){if(!ok)injectPrompt();});
 }
 
 // ── Init ──
@@ -794,9 +937,10 @@ jQuery(function(){
         eventSource.on(event_types.CHAT_CHANGED,function(){
             _board=null;loadState();_wantBoard=false;
             if(_injected)clearPrompt();
+            _lastBoardNoticeSig='';
             setTimeout(scanMessages,800);
         });
-        eventSource.on(event_types.GENERATION_STARTED,function(){if(shouldTrigger())injectPrompt();});
+        eventSource.on(event_types.GENERATION_STARTED,function(){if(shouldTrigger())handleBoardTrigger();});
         eventSource.on(event_types.GENERATION_ENDED,function(){_wantBoard=false;});
 
         // Periodic scrub
@@ -804,9 +948,12 @@ jQuery(function(){
 
         window.__gq={
             openPanel:openPanel,getProfile:getProfile,saveProfile:saveProfile,
-            requestBoard:function(){_wantBoard=true;injectPrompt();openPanel();switchTab('board');return'Board next.';},
+            requestBoard:function(){_wantBoard=true;handleBoardTrigger();openPanel();switchTab('board');return'Board next.';},
             resetProfile:function(){saveProfile(defProfile());if(_panelOpen)renderProfile();return'Reset.';},
             resetLayout:function(){resetUILayout(false);return'Layout reset.';},
+            getExtraApi:getExtraApi,
+            setExtraApi:function(cfg){saveExtraApi(cfg||{});return getExtraApi();},
+            requestNotificationPermission:requestNotificationPermission,
         };
 
         console.log('[GuildQuest v6.0] \u2694\uFE0F Extension ready');
