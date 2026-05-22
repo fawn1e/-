@@ -475,27 +475,10 @@ function injectGalleryButton() {
     document.body.appendChild(btn);
 }
 
-// Also inject click handler on character avatar in the UI
+// No longer intercepting avatar clicks — this was blocking
+// the native SillyTavern character gallery from opening.
 function injectAvatarClick() {
-    const avatarSelectors = [
-        "#avatar_load_preview",
-        ".avatar img",
-        "#user_avatar_block .avatar",
-    ];
-
-    avatarSelectors.forEach((sel) => {
-        document.querySelectorAll(sel).forEach((el) => {
-            if (el.dataset.agBound) return;
-            el.dataset.agBound = "1";
-            el.addEventListener("click", (e) => {
-                if (charKey()) {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    openModal();
-                }
-            });
-        });
-    });
+    // intentionally empty — FAB button is the only entry point now
 }
 
 // ──────────────────────────────────────────────
