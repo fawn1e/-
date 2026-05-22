@@ -45,6 +45,7 @@
 .gq-panel {
     position: fixed; bottom: 155px; right: 24px;
     width: 440px; max-height: 75vh;
+    min-width: 340px; min-height: 300px;
     background: linear-gradient(180deg, rgba(20,18,28,.98), rgba(10,10,18,.99));
     border: 1px solid rgba(180,150,90,.3);
     border-radius: 14px; z-index: 99998;
@@ -88,6 +89,21 @@
     display: flex; border-bottom: 1px solid rgba(180,150,90,.2);
     background: rgba(0,0,0,.3); flex-shrink: 0; position: relative; z-index: 2;
 }
+.gq-drag {
+    display: flex; align-items: center; justify-content: center;
+    width: 28px; flex-shrink: 0;
+    color: rgba(232,228,216,.6);
+    cursor: move; user-select: none; touch-action: none;
+    font-size: 14px; letter-spacing: -1px;
+    border-right: 1px solid rgba(180,150,90,.12);
+}
+.gq-layout-reset {
+    width: 28px; flex-shrink: 0;
+    border: none; border-right: 1px solid rgba(180,150,90,.12);
+    background: transparent; color: rgba(212,184,118,.85);
+    cursor: pointer; font-size: 14px; line-height: 1; padding: 0;
+}
+.gq-layout-reset:hover { background: rgba(180,150,90,.12); color: #d4b876; }
 .gq-tab {
     flex: 1; padding: 10px 4px; text-align: center;
     font-family: 'Cinzel', 'Times New Roman', serif;
@@ -106,6 +122,11 @@
 .gq-content::-webkit-scrollbar-thumb { background: rgba(212,184,118,.3); border-radius: 3px; }
 .gq-view { display: none; padding: 14px; }
 .gq-view.active { display: block; }
+.gq-resize {
+    position: absolute; right: 0; bottom: 0; z-index: 3;
+    width: 18px; height: 18px; cursor: nwse-resize; touch-action: none;
+    background: linear-gradient(135deg, transparent 50%, rgba(212,184,118,.45) 50%);
+}
 
 /* Header */
 .gq-hdr {
@@ -427,6 +448,19 @@
     to { opacity: 0; transform: translateX(20px); }
 }
 
+/* Hidden technical payload marker in chat */
+.gq-tech-hidden {
+    margin: 6px 0;
+    opacity: .8;
+    font-size: 12px;
+}
+.gq-tech-hidden > summary {
+    cursor: pointer;
+    color: #9aa0a6;
+    list-style: none;
+}
+.gq-tech-hidden > summary::-webkit-details-marker { display: none; }
+
 /* Empty state */
 .gq-empty {
     text-align: center; padding: 30px 20px;
@@ -449,23 +483,27 @@
         z-index: 99999;
     }
 
-    /* Panel — full-width overlay style */
+    /* Panel — mobile floating card with drag/resize support */
     .gq-panel {
         position: fixed;
-        top: 0;
-        left: 0;
-        right: 0;
-        bottom: 0;
-        width: 100%;
+        top: auto;
+        left: auto;
+        right: 8px;
+        bottom: calc(140px + env(safe-area-inset-bottom, 0px));
+        width: calc(100vw - 16px);
         max-width: 100vw;
-        max-height: 100%;
-        border-radius: 0;
-        border: none;
+        max-height: calc(100vh - 16px);
+        min-width: 280px;
+        min-height: 260px;
+        border-radius: 10px;
+        border: 1px solid rgba(180,150,90,.25);
         z-index: 100000;
     }
 
     /* Show close button on mobile */
     .gq-close { display: flex; }
+    .gq-drag, .gq-layout-reset { width: 34px; font-size: 16px; }
+    .gq-resize { width: 24px; height: 24px; }
 
     /* Tabs — bigger touch targets */
     .gq-tab {
