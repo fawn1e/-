@@ -7,6 +7,7 @@ const KEY_PROFILE = 'gq6_profile';
 const KEY_ACTIVE = 'gq6_active';
 const KEY_BOARD = 'gq6_board';
 const KEY_COMPLETED = 'gq6_completed';
+const KEY_UI = 'gq6_ui';
 
 const RANKS = ['F','E','D','C','B','A','S','SS','SSS'];
 const RANK_TH = {F:0,E:3,D:8,C:18,B:35,A:60,S:100,SS:160,SSS:240};
@@ -81,6 +82,7 @@ const SCRUB_BRACKET = [
 // ── State ──
 let _panelOpen = false, _curTab = 'board', _board = null, _active = null;
 let _completed = {};
+let _ui = null;
 let _wantBoard = false, _injected = false;
 
 // ── Helpers ──
@@ -101,17 +103,33 @@ function getProfile(){
 }
 function saveProfile(p){jSave(KEY_PROFILE,p);}
 function calcRank(p){var r='F';for(var i=0;i<RANKS.length;i++)if(p.completed>=RANK_TH[RANKS[i]])r=RANKS[i];return r;}
+function defUI(){return{fab:{x:null,y:null},panel:{x:null,y:null,w:null,h:null}};}
+function normUI(u){
+    var d=defUI();
+    if(!u||typeof u!=='object')return d;
+    if(!u.fab||typeof u.fab!=='object')u.fab={};
+    if(!u.panel||typeof u.panel!=='object')u.panel={};
+    d.fab.x=typeof u.fab.x==='number'?u.fab.x:null;
+    d.fab.y=typeof u.fab.y==='number'?u.fab.y:null;
+    d.panel.x=typeof u.panel.x==='number'?u.panel.x:null;
+    d.panel.y=typeof u.panel.y==='number'?u.panel.y:null;
+    d.panel.w=typeof u.panel.w==='number'?u.panel.w:null;
+    d.panel.h=typeof u.panel.h==='number'?u.panel.h:null;
+    return d;
+}
 function loadState(){
     _board=jLoad(KEY_BOARD,null);
     _active=jLoad(KEY_ACTIVE,null);
     _completed=jLoad(KEY_COMPLETED,{});
     if(!_completed||typeof _completed!=='object')_completed={};
+    _ui=normUI(jLoad(KEY_UI,defUI()));
     applyCompletedFilter();
 }
 function saveState(){
     if(_board)jSave(KEY_BOARD,_board);else localStorage.removeItem(KEY_BOARD);
     if(_active)jSave(KEY_ACTIVE,_active);else localStorage.removeItem(KEY_ACTIVE);
     if(_completed&&Object.keys(_completed).length)jSave(KEY_COMPLETED,_completed);else localStorage.removeItem(KEY_COMPLETED);
+    if(_ui)jSave(KEY_UI,_ui);else localStorage.removeItem(KEY_UI);
 }
 
 function questSig(q){
@@ -131,6 +149,46 @@ function applyCompletedFilter(){
         var sig=questSig(q);
         return sig?!_completed[sig]:true;
     });
+}
+function vpW(){return Math.max(document.documentElement.clientWidth||0,window.innerWidth||0);}
+function vpH(){return Math.max(document.documentElement.clientHeight||0,window.innerHeight||0);}
+function clamp(v,min,max){return Math.max(min,Math.min(max,v));}
+function panelMinW(){return vpW()<=768?280:340;}
+function panelMinH(){return vpW()<=768?260:300;}
+function panelMaxW(){return Math.max(panelMinW(),vpW()-12);}
+function panelMaxH(){return Math.max(panelMinH(),vpH()-12);}
+
+function applyUILayout(){
+    var fab=document.getElementById('gq-fab');
+    var panel=document.getElementById('gq-panel');
+    if(!_ui)_ui=defUI();
+    if(fab){
+        if(typeof _ui.fab.x==='number'&&typeof _ui.fab.y==='number'){
+            var fr=fab.getBoundingClientRect(),fw=fr.width||52,fh=fr.height||52;
+            var fx=clamp(_ui.fab.x,4,Math.max(4,vpW()-fw-4));
+            var fy=clamp(_ui.fab.y,4,Math.max(4,vpH()-fh-4));
+            _ui.fab.x=fx;_ui.fab.y=fy;
+            fab.style.left=fx+'px';fab.style.top=fy+'px';fab.style.right='auto';fab.style.bottom='auto';
+        }else{
+            fab.style.left='';fab.style.top='';fab.style.right='';fab.style.bottom='';
+        }
+    }
+    if(panel){
+        if(typeof _ui.panel.w==='number')panel.style.width=clamp(_ui.panel.w,panelMinW(),panelMaxW())+'px';else panel.style.width='';
+        if(typeof _ui.panel.h==='number')panel.style.height=clamp(_ui.panel.h,panelMinH(),panelMaxH())+'px';else panel.style.height='';
+        if(typeof _ui.panel.x==='number'&&typeof _ui.panel.y==='number'){
+            panel.style.left=_ui.panel.x+'px';panel.style.top=_ui.panel.y+'px';panel.style.right='auto';panel.style.bottom='auto';
+        }else{
+            panel.style.left='';panel.style.top='';panel.style.right='';panel.style.bottom='';
+        }
+        var pr=panel.getBoundingClientRect(),pw=pr.width,ph=pr.height;
+        var px=typeof _ui.panel.x==='number'?_ui.panel.x:pr.left,py=typeof _ui.panel.y==='number'?_ui.panel.y:pr.top;
+        var nx=clamp(px,4,Math.max(4,vpW()-pw-4)),ny=clamp(py,4,Math.max(4,vpH()-ph-4));
+        if(nx!==px||ny!==py){
+            panel.style.left=nx+'px';panel.style.top=ny+'px';panel.style.right='auto';panel.style.bottom='auto';
+            _ui.panel.x=nx;_ui.panel.y=ny;saveState();
+        }
+    }
 }
 
 function checkUnlocks(p){
@@ -215,6 +273,113 @@ function toast(text,type){
     setTimeout(function(){t.remove();},3300);
 }
 
+function resetUILayout(showToast){
+    _ui=defUI();
+    saveState();
+    applyUILayout();
+    if(showToast)toast('\u21BB Положение и размер виджета сброшены','info');
+}
+
+function initWidgetInteractions(fab,panel,dragHandle,resizeHandle){
+    if(!fab||!panel)return;
+
+    function enableFabDrag(){
+        var st={on:false,id:null,sx:0,sy:0,ox:0,oy:0,moved:false};
+        fab.addEventListener('pointerdown',function(e){
+            if(e.button!==undefined&&e.button!==0)return;
+            e.preventDefault();e.stopPropagation();
+            var r=fab.getBoundingClientRect();
+            st.on=true;st.id=e.pointerId;st.sx=e.clientX;st.sy=e.clientY;st.ox=r.left;st.oy=r.top;st.moved=false;
+            try{fab.setPointerCapture(e.pointerId);}catch(err){}
+        });
+        fab.addEventListener('pointermove',function(e){
+            if(!st.on||e.pointerId!==st.id)return;
+            var dx=e.clientX-st.sx,dy=e.clientY-st.sy;
+            if(Math.abs(dx)>4||Math.abs(dy)>4)st.moved=true;
+            var r=fab.getBoundingClientRect();
+            var nx=clamp(st.ox+dx,4,Math.max(4,vpW()-r.width-4));
+            var ny=clamp(st.oy+dy,4,Math.max(4,vpH()-r.height-4));
+            fab.style.left=nx+'px';fab.style.top=ny+'px';fab.style.right='auto';fab.style.bottom='auto';
+        });
+        function finish(e){
+            if(!st.on||e.pointerId!==st.id)return;
+            try{fab.releasePointerCapture(e.pointerId);}catch(err){}
+            st.on=false;
+            if(st.moved){
+                var r=fab.getBoundingClientRect();
+                _ui.fab.x=r.left;_ui.fab.y=r.top;saveState();
+            }else togglePanel();
+        }
+        fab.addEventListener('pointerup',finish);
+        fab.addEventListener('pointercancel',finish);
+    }
+
+    function enablePanelDrag(){
+        if(!dragHandle)return;
+        var st={on:false,id:null,sx:0,sy:0,ox:0,oy:0};
+        dragHandle.addEventListener('pointerdown',function(e){
+            if(e.button!==undefined&&e.button!==0)return;
+            e.preventDefault();e.stopPropagation();
+            var r=panel.getBoundingClientRect();
+            st.on=true;st.id=e.pointerId;st.sx=e.clientX;st.sy=e.clientY;st.ox=r.left;st.oy=r.top;
+            panel.style.right='auto';panel.style.bottom='auto';
+            try{dragHandle.setPointerCapture(e.pointerId);}catch(err){}
+        });
+        dragHandle.addEventListener('pointermove',function(e){
+            if(!st.on||e.pointerId!==st.id)return;
+            var r=panel.getBoundingClientRect();
+            var nx=clamp(st.ox+(e.clientX-st.sx),4,Math.max(4,vpW()-r.width-4));
+            var ny=clamp(st.oy+(e.clientY-st.sy),4,Math.max(4,vpH()-r.height-4));
+            panel.style.left=nx+'px';panel.style.top=ny+'px';
+        });
+        function finish(e){
+            if(!st.on||e.pointerId!==st.id)return;
+            try{dragHandle.releasePointerCapture(e.pointerId);}catch(err){}
+            st.on=false;
+            var r=panel.getBoundingClientRect();
+            _ui.panel.x=r.left;_ui.panel.y=r.top;saveState();
+        }
+        dragHandle.addEventListener('pointerup',finish);
+        dragHandle.addEventListener('pointercancel',finish);
+    }
+
+    function enablePanelResize(){
+        if(!resizeHandle)return;
+        var st={on:false,id:null,sx:0,sy:0,ow:0,oh:0};
+        resizeHandle.addEventListener('pointerdown',function(e){
+            if(e.button!==undefined&&e.button!==0)return;
+            e.preventDefault();e.stopPropagation();
+            var r=panel.getBoundingClientRect();
+            st.on=true;st.id=e.pointerId;st.sx=e.clientX;st.sy=e.clientY;st.ow=r.width;st.oh=r.height;
+            panel.style.right='auto';panel.style.bottom='auto';
+            try{resizeHandle.setPointerCapture(e.pointerId);}catch(err){}
+        });
+        resizeHandle.addEventListener('pointermove',function(e){
+            if(!st.on||e.pointerId!==st.id)return;
+            var nw=clamp(st.ow+(e.clientX-st.sx),panelMinW(),panelMaxW());
+            var nh=clamp(st.oh+(e.clientY-st.sy),panelMinH(),panelMaxH());
+            panel.style.width=nw+'px';panel.style.height=nh+'px';
+            applyUILayout();
+        });
+        function finish(e){
+            if(!st.on||e.pointerId!==st.id)return;
+            try{resizeHandle.releasePointerCapture(e.pointerId);}catch(err){}
+            st.on=false;
+            var r=panel.getBoundingClientRect();
+            _ui.panel.w=r.width;_ui.panel.h=r.height;
+            _ui.panel.x=r.left;_ui.panel.y=r.top;
+            saveState();
+        }
+        resizeHandle.addEventListener('pointerup',finish);
+        resizeHandle.addEventListener('pointercancel',finish);
+    }
+
+    enableFabDrag();
+    enablePanelDrag();
+    enablePanelResize();
+    window.addEventListener('resize',function(){applyUILayout();});
+}
+
 // ── Auto-check objectives ──
 function autoCheck(text){
     if(!_active||!_active.objs)return false;
@@ -248,12 +413,13 @@ function createUI(){
     if(document.getElementById('gq-fab'))return;
     var fab=document.createElement('div');
     fab.id='gq-fab';fab.className='gq-fab';fab.innerHTML='\u2694';fab.title='Доска заданий гильдии';
-    fab.addEventListener('click',function(e){e.stopPropagation();togglePanel();});
     document.body.appendChild(fab);
 
     var panel=document.createElement('div');
     panel.id='gq-panel';panel.className='gq-panel';
     panel.innerHTML='<div class="gq-tabs">'
+        +'<button class="gq-layout-reset" id="gq-layout-reset" title="Сбросить положение">\u21BB</button>'
+        +'<div class="gq-drag" id="gq-drag" title="Перетащить">⋮⋮</div>'
         +'<div class="gq-tab active" data-tab="board"><i class="fa-solid fa-scroll"></i> Доска</div>'
         +'<div class="gq-tab" data-tab="active"><i class="fa-solid fa-crosshairs"></i> Задание</div>'
         +'<div class="gq-tab" data-tab="profile"><i class="fa-solid fa-user"></i> Профиль</div>'
@@ -265,7 +431,8 @@ function createUI(){
         +'<div class="gq-view" data-view="active" id="gq-v-active"></div>'
         +'<div class="gq-view" data-view="profile" id="gq-v-profile"></div>'
         +'<div class="gq-view" data-view="achievements" id="gq-v-achs"></div>'
-        +'</div>';
+        +'</div>'
+        +'<div class="gq-resize" id="gq-resize" title="Изменить размер"></div>';
     panel.addEventListener('click',function(e){e.stopPropagation();});
     document.body.appendChild(panel);
 
@@ -275,13 +442,22 @@ function createUI(){
     }
     var closeBtn=document.getElementById('gq-close');
     if(closeBtn)closeBtn.addEventListener('click',function(e){e.stopPropagation();closePanel();});
+    var resetBtn=document.getElementById('gq-layout-reset');
+    if(resetBtn)resetBtn.addEventListener('click',function(e){e.preventDefault();e.stopPropagation();resetUILayout(true);});
+    initWidgetInteractions(
+        fab,panel,
+        document.getElementById('gq-drag'),
+        document.getElementById('gq-resize')
+    );
+    applyUILayout();
     document.addEventListener('click',function(e){
-        if(_panelOpen&&!panel.contains(e.target)&&e.target.id!=='gq-fab')closePanel();
+        var inFab=!!(e.target&&(e.target.id==='gq-fab'||(e.target.closest&&e.target.closest('#gq-fab'))));
+        if(_panelOpen&&!panel.contains(e.target)&&!inFab)closePanel();
     });
 }
 
 function togglePanel(){if(_panelOpen)closePanel();else openPanel();}
-function openPanel(){_panelOpen=true;var p=document.getElementById('gq-panel');if(p)p.classList.add('open');refreshTab();}
+function openPanel(){_panelOpen=true;var p=document.getElementById('gq-panel');if(p){p.classList.add('open');applyUILayout();}refreshTab();}
 function closePanel(){_panelOpen=false;var p=document.getElementById('gq-panel');if(p)p.classList.remove('open');}
 function switchTab(t){
     _curTab=t;var panel=document.getElementById('gq-panel');if(!panel)return;
@@ -630,6 +806,7 @@ jQuery(function(){
             openPanel:openPanel,getProfile:getProfile,saveProfile:saveProfile,
             requestBoard:function(){_wantBoard=true;injectPrompt();openPanel();switchTab('board');return'Board next.';},
             resetProfile:function(){saveProfile(defProfile());if(_panelOpen)renderProfile();return'Reset.';},
+            resetLayout:function(){resetUILayout(false);return'Layout reset.';},
         };
 
         console.log('[GuildQuest v6.0] \u2694\uFE0F Extension ready');
