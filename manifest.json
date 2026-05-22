@@ -1,12 +1,12 @@
 {
-    "display_name": "⚔️ Guild Quest Board",
-    "loading_order": 100,
+    "display_name": "Avatar Gallery",
+    "loading_order": 10,
     "requires": [],
     "optional": [],
     "js": "index.js",
     "css": "style.css",
-    "author": "User",
-    "version": "6.0.0",
+    "author": "custom",
+    "version": "1.0.0",
     "homePage": "",
     "auto_update": false
 }

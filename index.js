@@ -1,1232 +1,407 @@
-// Guild Quest Board v6.0 — SillyTavern Extension
-import { setExtensionPrompt, extension_prompt_types, extension_prompt_roles } from '../../../../script.js';
-import { eventSource, event_types } from '../../../../script.js';
+// ===== Avatar Gallery Extension for SillyTavern =====
+// Adds a multi-avatar gallery to characters and personas
 
-const EXT_ID = 'guild-quest-board';
-const KEY_PROFILE = 'gq6_profile';
-const KEY_ACTIVE = 'gq6_active';
-const KEY_BOARD = 'gq6_board';
-const KEY_COMPLETED = 'gq6_completed';
-const KEY_UI = 'gq6_ui';
-const KEY_EXTRA_API = 'gq6_extra_api';
+import { extension_settings, saveSettingsDebounced } from "../../../extensions.js";
+import { eventSource, event_types, this_chid, characters } from "../../../../script.js";
 
-const RANKS = ['F','E','D','C','B','A','S','SS','SSS'];
-const RANK_TH = {F:0,E:3,D:8,C:18,B:35,A:60,S:100,SS:160,SSS:240};
-const RANK_REP = {F:5,E:10,D:20,C:40,B:80,A:150,S:300,SS:600,SSS:1200};
+const EXT = "avatar-gallery";
 
-const QT = {
-    STORY:{ru:'Сюжетный',icon:'\u2726'},GUILD:{ru:'Гильдейский',icon:'\u2694'},
-    SIDE:{ru:'Побочный',icon:'\u25C6'},URGENT:{ru:'Срочный',icon:'\u26A0'},
-    DAILY:{ru:'Ежедневный',icon:'\u2600'},HUNT:{ru:'Охота',icon:'\uD83C\uDFF9'},
-    ESCORT:{ru:'Сопровождение',icon:'\uD83D\uDEE1'},DUNGEON:{ru:'Подземелье',icon:'\uD83D\uDDDD'},
-    INVESTIGATE:{ru:'Расследование',icon:'\uD83D\uDD0D'},SPECIAL:{ru:'Особое',icon:'\u2605'},
-    RAID:{ru:'Рейд',icon:'\u2620'},
-};
+// Init settings storage
+if (!extension_settings[EXT]) extension_settings[EXT] = {};
+const store = extension_settings[EXT]; // { [charKey]: { avatars: [{src,label}], activeIdx: 0 } }
 
-const TITLES = [
-    {id:'newbie',name:'Новичок',c:p=>p.completed>=1},
-    {id:'reliable',name:'Надёжный',c:p=>p.completed>=10},
-    {id:'veteran',name:'Ветеран',c:p=>p.completed>=25},
-    {id:'hero',name:'Герой Гильдии',c:p=>p.completed>=50},
-    {id:'legend',name:'Легенда',c:p=>p.completed>=100},
-    {id:'hunter',name:'Охотник',c:p=>(p.byType||{}).HUNT>=10},
-    {id:'detective',name:'Сыщик',c:p=>(p.byType||{}).INVESTIGATE>=5},
-    {id:'dungeoneer',name:'Покоритель Подземелий',c:p=>(p.byType||{}).DUNGEON>=10},
-    {id:'crisis',name:'Решающий Кризисы',c:p=>(p.byType||{}).URGENT>=15},
-    {id:'rich',name:'Богач',c:p=>p.gold>=10000},
-    {id:'flawless',name:'Безупречный',c:p=>p.completed>=20&&(p.failed||0)===0},
-];
-
-const ACHS = [
-    {id:'first',name:'Первый шаг',desc:'Первое задание',c:p=>p.completed>=1},
-    {id:'ten',name:'Постоянный клиент',desc:'10 заданий',c:p=>p.completed>=10},
-    {id:'rE',name:'За пределами F',desc:'Ранг E',c:p=>RANKS.indexOf(p.rank)>=1},
-    {id:'rC',name:'Не новичок',desc:'Ранг C',c:p=>RANKS.indexOf(p.rank)>=3},
-    {id:'rA',name:'Элита',desc:'Ранг A',c:p=>RANKS.indexOf(p.rank)>=5},
-    {id:'rS',name:'S-класс',desc:'Ранг S',c:p=>RANKS.indexOf(p.rank)>=6},
-    {id:'rSSS',name:'Вершина мира',desc:'Ранг SSS',c:p=>RANKS.indexOf(p.rank)>=8},
-    {id:'g1k',name:'Тысячник',desc:'1000 золота',c:p=>p.gold>=1000},
-    {id:'g10k',name:'Богач',desc:'10000 золота',c:p=>p.gold>=10000},
-    {id:'noFail',name:'Безошибочный',desc:'20 без провала',c:p=>p.completed>=20&&(p.failed||0)===0},
-];
-
-// ── Regex ──
-const BOARD_JSON_RE = /<guild_board>\s*([\s\S]*?)\s*<\/guild_board>/i;
-const LEGACY_G_RE = /\[Guild\|([^|\]]*)\|([^|\]]*)\|([^\]]*)\]/i;
-const LEGACY_Q_RE = /\[Q\d+\|([^|\]]*)\|([^|\]]*)\|([^|\]]*)\|([^|\]]*)\|([^|\]]*)\|([^|\]]*)\|([^\]]*)\]/g;
-const DONE_RE = /<gq_done>([\s\S]*?)<\/gq_done>/gi;
-const TRIGGER_RE = /(гильди|доск[ае]\s+объявлен|quest\s+board|guild\s+board|подош[её]л\s+к\s+доск|подошла\s+к\s+доск|заш[её]л\s+в\s+гильди|зашла\s+в\s+гильди)/i;
-
-// Tags to remove from visible chat
-const SCRUB_RE = [
-    /<guild_board\b[^>]*>[\s\S]*?<\/guild_board>/gi,
-    /<guild_active\b[^>]*>[\s\S]*?<\/guild_active>/gi,
-    /<guild_quests\b[^>]*>[\s\S]*?<\/guild_quests>/gi,
-    /<gq_done\b[^>]*>[\s\S]*?<\/gq_done>/gi,
-    /<gq_fail\b[^>]*>[\s\S]*?<\/gq_fail>/gi,
-    /<gq_reward\b[^>]*>[\s\S]*?<\/gq_reward>/gi,
-    /<gq_rep\b[^>]*>[\s\S]*?<\/gq_rep>/gi,
-    /&lt;guild_board&gt;[\s\S]*?&lt;\/guild_board&gt;/gi,
-    /&lt;guild_active&gt;[\s\S]*?&lt;\/guild_active&gt;/gi,
-    /&lt;guild_quests&gt;[\s\S]*?&lt;\/guild_quests&gt;/gi,
-    /&lt;gq_done&gt;[\s\S]*?&lt;\/gq_done&gt;/gi,
-    /&lt;gq_fail&gt;[\s\S]*?&lt;\/gq_fail&gt;/gi,
-    /&lt;gq_reward&gt;[\s\S]*?&lt;\/gq_reward&gt;/gi,
-    /&lt;gq_rep&gt;[\s\S]*?&lt;\/gq_rep&gt;/gi,
-    // Raw JSON guild board that leaks as plain text (various spacings)
-    /\{\s*"guild"\s*:\s*"[^"]*"\s*,\s*"(?:loc|rank|quests)"[\s\S]{10,4000}?"quests"\s*:\s*\[[\s\S]*?\]\s*\}/gi,
-    // Broader: any object starting with "guild" key followed by "quests" array
-    /\{\s*(?:\u{fffd}\s*)?[""]guild[""]\s*:[\s\S]{5,5000}?[""]quests[""]\s*:\s*\[[\s\S]*?\]\s*\}/giu,
-    // Escaped unicode markers (\ufffd or replacement chars) mixed with JSON
-    /\{\s*\ufffd[^}]{10,5000}(?:quests|objs)[^}]{0,5000}\}/gi,
-    // Individual quest JSON objects with "title" + "objs" keys (any quote style)
-    /\{\s*(?:&quot;|\u201c|\u201d|"|&#34;|[\ufffd])?\s*title\s*(?:&quot;|\u201c|\u201d|"|&#34;|[\ufffd])?\s*:[\s\S]{10,2000}?objs[\s\S]{0,200}?\[[^\]]*\]\s*\}/gi,
-    // Comma-separated sequence of quest objects: {...},...{...}
-    /(?:\{\s*(?:"|&quot;|[\ufffd\u201c\u201d])?\s*title[\s\S]{10,2000}?objs[\s\S]{0,500}?\]\s*\}\s*,?\s*){2,}/gi,
-];
-// Raw bracket markup that leaks into chat
-const SCRUB_BRACKET = [
-    /\[Guild\|[^\]\r\n]{1,200}\]/g,
-    /\[Q\d+\|[^\]\r\n]{1,400}\]/g,
-    // System Note prompt that leaks
-    /\[System Note:[\s\S]{0,2000}?guild[\s\S]{0,2000}?\]/gi,
-];
-
-// ── State ──
-let _panelOpen = false, _curTab = 'board', _board = null, _active = null;
-let _completed = {};
-let _ui = null;
-let _extraApi = null;
-let _wantBoard = false, _injected = false;
-let _lastBoardNoticeSig = '';
-let _chatId = '';  // per-chat scoping
-
-// ── Helpers ──
-function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
-function rCls(r){r=String(r||'').trim().toUpperCase();return 'gq-r'+(RANKS.indexOf(r)>=0?r:'F');}
-function pGold(s){var m=String(s||'').match(/(\d+)/);return m?parseInt(m[1],10):0;}
-function jLoad(k,d){try{var v=JSON.parse(localStorage.getItem(k));return v!=null?v:d;}catch(e){return d;}}
-function jSave(k,v){try{localStorage.setItem(k,JSON.stringify(v));}catch(e){}}
-function tryJSON(s){try{return JSON.parse(s);}catch(e){return null;}}
-
-// ── Chat ID for per-chat scoping ──
-function getChatId(){
-    try{
-        var ctx=null;
-        if(typeof SillyTavern!=='undefined'&&SillyTavern.getContext)ctx=SillyTavern.getContext();
-        else if(typeof getContext==='function')ctx=getContext();
-        if(ctx){
-            if(ctx.chatId)return String(ctx.chatId);
-            if(ctx.characterId!=null)return 'char_'+ctx.characterId;
-            if(ctx.characters&&ctx.characters.length&&ctx.character_id!=null)return 'char_'+ctx.character_id;
+// ──────────────────────────────────────────────
+//  Helpers
+// ──────────────────────────────────────────────
+function currentCharKey() {
+    try {
+        const ctx = SillyTavern?.getContext?.();
+        if (ctx?.name2) return `char::${ctx.name2}`;
+        if (typeof this_chid !== "undefined" && this_chid >= 0 && characters?.[this_chid]) {
+            return `char::${characters[this_chid].name}`;
         }
-    }catch(e){}
-    return '';
-}
-function chatKey(base){
-    var id=_chatId||getChatId();
-    return id?(base+'_'+id):base;
+    } catch {}
+    return null;
 }
 
-// ── Profile (per-chat) ──
-function defProfile(){return{name:'Авантюрист',avatar:'',rank:'F',gold:0,completed:0,failed:0,byType:{},history:[],reputation:{},titles:[],activeTitle:'',achievements:[]};}
-function getPersonaInfo(){
-    // Get current persona name and avatar from SillyTavern context
-    try{
-        var ctx=null;
-        if(typeof SillyTavern!=='undefined'&&SillyTavern.getContext)ctx=SillyTavern.getContext();
-        else if(typeof getContext==='function')ctx=getContext();
-        if(!ctx)return null;
-        var name='',avatar='';
-        // User persona
-        if(ctx.name1)name=String(ctx.name1);
-        if(ctx.user_avatar)avatar='/User Avatars/'+String(ctx.user_avatar);
-        // If persona is set via personas system
-        if(typeof ctx.personas==='object'&&ctx.default_persona){
-            var pn=ctx.personas[ctx.default_persona];
-            if(pn)name=String(pn);
+function currentCharName() {
+    try {
+        const ctx = SillyTavern?.getContext?.();
+        if (ctx?.name2) return ctx.name2;
+        if (typeof this_chid !== "undefined" && this_chid >= 0 && characters?.[this_chid]) {
+            return characters[this_chid].name;
         }
-        return{name:name||'',avatar:avatar||''};
-    }catch(e){return null;}
-}
-function getProfile(){
-    var p=jLoad(chatKey(KEY_PROFILE),null);
-    // Fallback: try loading legacy global profile
-    if(!p||typeof p.gold!=='number'){
-        p=jLoad(KEY_PROFILE,null);
-    }
-    if(!p||typeof p.gold!=='number')p=defProfile();
-    var d=defProfile();for(var k in d)if(p[k]===undefined)p[k]=d[k];
-    // Auto-populate name and avatar from persona if not manually set
-    var persona=getPersonaInfo();
-    if(persona){
-        if((!p.name||p.name==='Авантюрист')&&persona.name)p.name=persona.name;
-        if(!p.avatar&&persona.avatar)p.avatar=persona.avatar;
-    }
-    return p;
-}
-function saveProfile(p){jSave(chatKey(KEY_PROFILE),p);}
-function calcRank(p){var r='F';for(var i=0;i<RANKS.length;i++)if(p.completed>=RANK_TH[RANKS[i]])r=RANKS[i];return r;}
-function defUI(){return{fab:{x:null,y:null},panel:{x:null,y:null,w:null,h:null}};}
-function defExtraApi(){return{enabled:false,url:'',key:'',model:'',maxTokens:800,headers:{}};}
-const EXTRA_MODELS = [
-    {id:'gpt-4o-mini',name:'GPT-4o Mini'},
-    {id:'gpt-4o',name:'GPT-4o'},
-    {id:'gpt-4-turbo',name:'GPT-4 Turbo'},
-    {id:'gpt-3.5-turbo',name:'GPT-3.5 Turbo'},
-    {id:'claude-3-haiku-20240307',name:'Claude 3 Haiku'},
-    {id:'claude-3-5-sonnet-20241022',name:'Claude 3.5 Sonnet'},
-    {id:'gemini-1.5-flash',name:'Gemini 1.5 Flash'},
-    {id:'gemini-1.5-pro',name:'Gemini 1.5 Pro'},
-    {id:'mistral-small-latest',name:'Mistral Small'},
-    {id:'mistral-large-latest',name:'Mistral Large'},
-    {id:'command-r',name:'Cohere Command R'},
-    {id:'custom',name:'Своя модель (ввести вручную)'},
-];
-function normExtraApi(c){
-    var d=defExtraApi();
-    if(!c||typeof c!=='object')return d;
-    d.enabled=!!c.enabled;
-    d.url=String(c.url||c.proxy||'').trim();
-    d.key=String(c.key||'').trim();
-    d.model=String(c.model||'').trim();
-    d.maxTokens=typeof c.maxTokens==='number'?c.maxTokens:800;
-    d.headers=(c.headers&&typeof c.headers==='object')?c.headers:{};
-    return d;
-}
-function getExtraApi(){
-    if(!_extraApi)_extraApi=normExtraApi(jLoad(KEY_EXTRA_API,defExtraApi()));
-    return _extraApi;
-}
-function saveExtraApi(cfg){
-    _extraApi=normExtraApi(cfg);
-    jSave(KEY_EXTRA_API,_extraApi);
-    return _extraApi;
-}
-function normUI(u){
-    var d=defUI();
-    if(!u||typeof u!=='object')return d;
-    if(!u.fab||typeof u.fab!=='object')u.fab={};
-    if(!u.panel||typeof u.panel!=='object')u.panel={};
-    d.fab.x=typeof u.fab.x==='number'?u.fab.x:null;
-    d.fab.y=typeof u.fab.y==='number'?u.fab.y:null;
-    d.panel.x=typeof u.panel.x==='number'?u.panel.x:null;
-    d.panel.y=typeof u.panel.y==='number'?u.panel.y:null;
-    d.panel.w=typeof u.panel.w==='number'?u.panel.w:null;
-    d.panel.h=typeof u.panel.h==='number'?u.panel.h:null;
-    return d;
-}
-function loadState(){
-    _chatId=getChatId();
-    _board=jLoad(chatKey(KEY_BOARD),null);
-    _active=jLoad(chatKey(KEY_ACTIVE),null);
-    _completed=jLoad(chatKey(KEY_COMPLETED),{});
-    if(!_completed||typeof _completed!=='object')_completed={};
-    _ui=normUI(jLoad(KEY_UI,defUI()));
-    applyCompletedFilter();
-}
-function saveState(){
-    if(_board)jSave(chatKey(KEY_BOARD),_board);else localStorage.removeItem(chatKey(KEY_BOARD));
-    if(_active)jSave(chatKey(KEY_ACTIVE),_active);else localStorage.removeItem(chatKey(KEY_ACTIVE));
-    if(_completed&&Object.keys(_completed).length)jSave(chatKey(KEY_COMPLETED),_completed);else localStorage.removeItem(chatKey(KEY_COMPLETED));
-    if(_ui)jSave(KEY_UI,_ui);else localStorage.removeItem(KEY_UI);
+    } catch {}
+    return "Unknown";
 }
 
-function questSig(q){
-    if(!q)return '';
-    return [
-        String(q.title||'').trim().toLowerCase(),
-        String(q.client||'').trim().toLowerCase(),
-        String(q.location||'').trim().toLowerCase(),
-        String(q.deadline||'').trim().toLowerCase(),
-        String(q.type||'GUILD').trim().toUpperCase(),
-        String(q.diff||'F').trim().toUpperCase()
-    ].join('|');
+function getGallery(key) {
+    if (!key) return null;
+    if (!store[key]) store[key] = { avatars: [], activeIdx: -1 };
+    return store[key];
 }
-function applyCompletedFilter(){
-    if(!_board||!Array.isArray(_board.quests))return;
-    _board.quests=_board.quests.filter(function(q){
-        var sig=questSig(q);
-        return sig?!_completed[sig]:true;
+
+function save() { saveSettingsDebounced(); }
+
+// ──────────────────────────────────────────────
+//  Build modal HTML (once)
+// ──────────────────────────────────────────────
+function buildModal() {
+    if (document.getElementById("ag-modal")) return;
+
+    const html = `
+<div id="ag-modal">
+  <div class="ag-panel">
+
+    <div class="ag-header">
+      <div>
+        <span class="ag-title">🖼 Gallery</span>
+        <span class="ag-char-name" id="ag-char-name"></span>
+      </div>
+      <button class="ag-close" id="ag-close" title="Close">✕</button>
+    </div>
+
+    <div class="ag-preview-wrap">
+      <button class="ag-arrow" id="ag-prev" title="Previous">‹</button>
+      <div class="ag-main-img-box" id="ag-main-box">
+        <img id="ag-main-img" src="" alt="avatar" />
+        <div class="ag-active-glow"></div>
+      </div>
+      <button class="ag-arrow" id="ag-next" title="Next">›</button>
+    </div>
+
+    <div class="ag-meta">
+      <span class="ag-counter" id="ag-counter">0 / 0</span>
+      <button class="ag-set-btn" id="ag-set-btn">✓ Выбрать</button>
+    </div>
+
+    <div class="ag-thumbs" id="ag-thumbs"></div>
+
+    <div class="ag-footer">
+      <button class="ag-upload-btn" id="ag-upload-btn">
+        <span>＋</span> Загрузить аватарку
+      </button>
+      <input type="file" id="ag-file-input" accept="image/*" multiple style="display:none" />
+    </div>
+
+  </div>
+</div>`;
+
+    document.body.insertAdjacentHTML("beforeend", html);
+
+    // Wire events
+    document.getElementById("ag-close").addEventListener("click", closeModal);
+    document.getElementById("ag-modal").addEventListener("click", e => {
+        if (e.target === document.getElementById("ag-modal")) closeModal();
     });
-}
-function vpW(){return Math.max(document.documentElement.clientWidth||0,window.innerWidth||0);}
-function vpH(){return Math.max(document.documentElement.clientHeight||0,window.innerHeight||0);}
-function clamp(v,min,max){return Math.max(min,Math.min(max,v));}
-function panelMinW(){return vpW()<=768?260:320;}
-function panelMinH(){return vpW()<=768?240:280;}
-function panelMaxW(){return Math.max(panelMinW(),vpW()-12);}
-function panelMaxH(){return Math.max(panelMinH(),vpH()-12);}
-
-function applyUILayout(){
-    var fab=document.getElementById('gq-fab');
-    var panel=document.getElementById('gq-panel');
-    if(!_ui)_ui=defUI();
-    if(fab){
-        if(typeof _ui.fab.x==='number'&&typeof _ui.fab.y==='number'){
-            var fr=fab.getBoundingClientRect(),fw=fr.width||52,fh=fr.height||52;
-            var fx=clamp(_ui.fab.x,4,Math.max(4,vpW()-fw-4));
-            var fy=clamp(_ui.fab.y,4,Math.max(4,vpH()-fh-4));
-            _ui.fab.x=fx;_ui.fab.y=fy;
-            fab.style.left=fx+'px';fab.style.top=fy+'px';fab.style.right='auto';fab.style.bottom='auto';
-        }else{
-            fab.style.left='';fab.style.top='';fab.style.right='';fab.style.bottom='';
-        }
-    }
-    if(panel){
-        if(typeof _ui.panel.w==='number')panel.style.width=clamp(_ui.panel.w,panelMinW(),panelMaxW())+'px';else panel.style.width='';
-        if(typeof _ui.panel.h==='number')panel.style.height=clamp(_ui.panel.h,panelMinH(),panelMaxH())+'px';else panel.style.height='';
-        if(typeof _ui.panel.x==='number'&&typeof _ui.panel.y==='number'){
-            panel.style.left=_ui.panel.x+'px';panel.style.top=_ui.panel.y+'px';panel.style.right='auto';panel.style.bottom='auto';
-        }else{
-            panel.style.left='';panel.style.top='';panel.style.right='';panel.style.bottom='';
-        }
-        var pr=panel.getBoundingClientRect(),pw=pr.width,ph=pr.height;
-        var px=typeof _ui.panel.x==='number'?_ui.panel.x:pr.left,py=typeof _ui.panel.y==='number'?_ui.panel.y:pr.top;
-        var nx=clamp(px,4,Math.max(4,vpW()-pw-4)),ny=clamp(py,4,Math.max(4,vpH()-ph-4));
-        if(nx!==px||ny!==py){
-            panel.style.left=nx+'px';panel.style.top=ny+'px';panel.style.right='auto';panel.style.bottom='auto';
-            _ui.panel.x=nx;_ui.panel.y=ny;saveState();
-        }
-    }
-}
-
-function checkUnlocks(p){
-    var nt=[],na=[];
-    for(var t of TITLES)if(!p.titles.includes(t.id)&&t.c(p)){p.titles.push(t.id);nt.push(t.name);}
-    for(var a of ACHS)if(!p.achievements.includes(a.id)&&a.c(p)){p.achievements.push(a.id);na.push(a.name);}
-    return{titles:nt,achs:na};
-}
-function boardSig(board){
-    if(!board||!Array.isArray(board.quests))return '';
-    return (board.guild||'')+'|'+(board.rank||'')+'|'+board.quests.map(function(q){
-        return [q.title,q.diff,q.type,q.reward,q.client,q.deadline,q.location].join('#');
-    }).join('|');
-}
-function notifyDesktop(title,body){
-    try{
-        if(!('Notification' in window))return;
-        if(Notification.permission!=='granted')return;
-        new Notification(title||'Guild Quest', {body:String(body||'')});
-    }catch(e){}
-}
-function notify(text,type,desktopTitle){
-    toast(text,type);
-    notifyDesktop(desktopTitle||'Guild Quest',text);
-}
-function notifyBoardAvailable(board){
-    if(!board||!Array.isArray(board.quests)||!board.quests.length)return;
-    var sig=boardSig(board);
-    if(sig&&sig===_lastBoardNoticeSig)return;
-    _lastBoardNoticeSig=sig||_lastBoardNoticeSig;
-    notify('📜 Доступно заданий: '+board.quests.length,'info','Новые задания гильдии');
-}
-function applyBoard(board,opts){
-    if(!board||!board.quests||!board.quests.length)return false;
-    _board=board;
-    applyCompletedFilter();
-    saveState();
-    if(!(opts&&opts.silent))notifyBoardAvailable(_board);
-    if(!_panelOpen){openPanel();switchTab('board');}else renderBoard();
-    updateBadge();
-    return true;
-}
-function parseDoneListFromAny(raw){
-    if(!raw)return [];
-    var out=[],s=String(raw||''),m;
-    try{
-        var j=typeof raw==='string'?tryJSON(raw):raw;
-        if(j&&typeof j==='object'){
-            var arr=Array.isArray(j.done)?j.done:(Array.isArray(j.objectives)?j.objectives:[]);
-            for(var i=0;i<arr.length;i++)if(arr[i])out.push(String(arr[i]).trim());
-            return out.filter(Boolean);
-        }
-    }catch(e){}
-    var re=new RegExp(DONE_RE.source,'gi');
-    while((m=re.exec(s))!==null){if((m[1]||'').trim())out.push((m[1]||'').trim());}
-    return out.filter(Boolean);
-}
-async function fetchExtraApi(payload){
-    var cfg=getExtraApi();
-    if(!cfg.enabled||!cfg.url)return null;
-    var endpoint=cfg.url;
-    var headers={'Content-Type':'application/json'};
-    if(cfg.key){headers.Authorization='Bearer '+cfg.key;headers['X-API-Key']=cfg.key;}
-    for(var hk in cfg.headers){if(cfg.headers[hk]!=null)headers[String(hk)]=String(cfg.headers[hk]);}
-    var body={model:cfg.model||undefined,max_tokens:cfg.maxTokens||800,input:payload,payload:payload,task:payload&&payload.task?payload.task:undefined};
-    try{
-        var res=await fetch(endpoint,{method:'POST',headers:headers,body:JSON.stringify(body)});
-        if(!res.ok)return null;
-        var txt=await res.text();
-        return tryJSON(txt)||txt;
-    }catch(e){return null;}
-}
-async function requestBoardFromExtraApi(){
-    var cfg=getExtraApi();
-    if(!cfg.enabled||!cfg.url)return false;
-    var ctx=null;
-    try{if(typeof SillyTavern!=='undefined'&&SillyTavern.getContext)ctx=SillyTavern.getContext();else if(typeof getContext==='function')ctx=getContext();}catch(e){}
-    // Token economy: send only last 6 messages, trimmed to 200 chars each
-    var chat=(ctx&&Array.isArray(ctx.chat)?ctx.chat:[]).slice(-6).map(function(m){
-        var t=String((m&&m.mes)||'').slice(0,200);
-        return{role:m&&m.is_user?'user':'assistant',text:t};
-    });
-    var payload={task:'generate_guild_board',profile:{rank:getProfile().rank,completed:getProfile().completed,gold:getProfile().gold},chat:chat,active:_active?{title:_active.title,type:_active.type}:null};
-    var raw=await fetchExtraApi(payload);
-    if(!raw)return false;
-    var board=null;
-    if(raw&&typeof raw==='object'&&!Array.isArray(raw)){
-        if(raw.board&&Array.isArray(raw.board.quests))board=normBoard(raw.board);
-        else if(raw.guild&&Array.isArray(raw.quests))board=normBoard(raw);
-        else if(raw.output_text)board=parseBoard(String(raw.output_text||''));
-        else if(raw.text)board=parseBoard(String(raw.text||''));
-    }else board=parseBoard(String(raw||''));
-    if(board&&board.quests&&board.quests.length){
-        applyBoard(board);
-        _wantBoard=false;
-        if(_injected)clearPrompt();
-        return true;
-    }
-    return false;
-}
-async function trackObjectivesByExtraApi(text){
-    var cfg=getExtraApi();
-    if(!cfg.enabled||!cfg.url||!_active||!text)return false;
-    // Token economy: send only objective texts and trimmed message (300 chars max)
-    var objs=(_active.objs||[]).map(function(o){return{text:o.text,done:o.done};});
-    var payload={task:'track_guild_objectives',objectives:objs,message:String(text||'').slice(0,300)};
-    var raw=await fetchExtraApi(payload);
-    if(!raw)return false;
-    var done=parseDoneListFromAny(raw);
-    if(!done.length)return false;
-    var tagText=done.map(function(d){return'<gq_done>'+d+'</gq_done>';}).join('');
-    return autoCheck(tagText);
-}
-async function requestNotificationPermission(){
-    try{
-        if(!('Notification' in window))return 'unsupported';
-        if(Notification.permission==='granted')return 'granted';
-        if(Notification.permission==='denied')return 'denied';
-        return await Notification.requestPermission();
-    }catch(e){return 'error';}
-}
-
-// ── Parse ──
-function parseBoard(text){
-    if(!text)return null;
-    var m=text.match(BOARD_JSON_RE);
-    if(m){
-        var inner=(m[1]||'').trim();
-        var i=inner.indexOf('{'),j=inner.lastIndexOf('}');
-        if(i>=0&&j>i){var d=tryJSON(inner.slice(i,j+1));if(d&&Array.isArray(d.quests))return normBoard(d);}
-        // Try parsing as array of quest objects inside guild_board
-        if(i>=0&&j>i){
-            var arrStr='['+inner.slice(i,j+1)+']';
-            var arr=tryJSON(arrStr);
-            if(arr&&Array.isArray(arr)&&arr.length&&arr[0].title)return normBoard({quests:arr});
-        }
-        var leg=parseLegacy(inner);if(leg)return leg;
-    }
-    // Try bare quest objects/array outside of tags
-    var bareArr=text.match(/\[\s*\{\s*"title"[\s\S]*?\}\s*\]/);
-    if(bareArr){var parsed=tryJSON(bareArr[0]);if(parsed&&Array.isArray(parsed)&&parsed.length&&parsed[0].title)return normBoard({quests:parsed});}
-    // Try comma-separated quest objects
-    var questObjs=text.match(/\{\s*"title"\s*:\s*"[^"]*"[\s\S]*?"objs"\s*:\s*\[[^\]]*\]\s*\}/g);
-    if(questObjs&&questObjs.length){
-        var qs=[];for(var qi=0;qi<questObjs.length;qi++){var qp=tryJSON(questObjs[qi]);if(qp&&qp.title)qs.push(qp);}
-        if(qs.length)return normBoard({quests:qs});
-    }
-    return parseLegacy(text);
-}
-function parseLegacy(text){
-    var g=text.match(LEGACY_G_RE);if(!g)return null;
-    var qs=[],re=new RegExp(LEGACY_Q_RE.source,'g'),m;
-    while((m=re.exec(text))!==null){
-        qs.push({id:'q'+(qs.length+1),title:(m[1]||'').trim(),desc:(m[2]||'').trim(),
-            diff:(m[3]||'').trim().toUpperCase(),reward:(m[4]||'').trim(),
-            client:(m[5]||'').trim(),deadline:(m[6]||'').trim(),type:'GUILD',
-            objs:(m[7]||'').split('//').map(function(s){return s.trim();}).filter(Boolean).map(function(t){return{text:t,done:false};})
-        });
-    }
-    if(!qs.length)return null;
-    return normBoard({guild:(g[1]||'').trim()||'Гильдия',loc:(g[2]||'').trim(),rank:(g[3]||'').trim().toUpperCase(),quests:qs});
-}
-function normBoard(b){
-    if(!b||!Array.isArray(b.quests))return null;
-    b.guild=b.guild||'Гильдия';b.loc=b.loc||'';b.rank=String(b.rank||'F').toUpperCase();
-    b.quests=b.quests.map(normQuest).filter(Boolean);return b;
-}
-function normQuest(q){
-    if(!q)return null;
-    var objs=Array.isArray(q.objs)?q.objs:(Array.isArray(q.objectives)?q.objectives:[]);
-    return{
-        id:q.id||'q'+Math.random().toString(36).slice(2,8),
-        title:String(q.title||'Задание').trim(),
-        desc:String(q.desc||q.description||'').trim(),
-        diff:String(q.diff||q.difficulty||'F').toUpperCase(),
-        type:String(q.type||'GUILD').toUpperCase(),
-        reward:String(q.reward||'').trim(),
-        client:String(q.client||'').trim(),
-        deadline:String(q.deadline||'').trim(),
-        location:String(q.location||'').trim(),
-        notes:String(q.notes||'').trim(),
-        storyLink:!!q.storyLink,
-        objs:objs.map(function(o){return typeof o==='string'?{text:o,done:false}:{text:String(o.text||'').trim(),done:!!o.done};}).filter(function(o){return o.text;})
-    };
-}
-
-// ── Scrub tags from chat ──
-function scrubChat(){
-    var msgs=document.querySelectorAll('.mes_text');
-    for(var i=0;i<msgs.length;i++){
-        var el=msgs[i], h=el.innerHTML;
-        if(!h)continue;
-        var orig=h;
-        var touched=false;
-        function mark(){touched=true;return '';}
-        for(var r=0;r<SCRUB_RE.length;r++) h=h.replace(SCRUB_RE[r],mark);
-        for(var r=0;r<SCRUB_BRACKET.length;r++) h=h.replace(SCRUB_BRACKET[r],mark);
-        h=h.replace(/```(?:json|xml|txt)?\s*(?:<guild_board>[\s\S]*?<\/guild_board>|\[Guild\|[\s\S]*?\])\s*```/gi,function(){touched=true;return '';});
-        // Catch any remaining raw JSON-like guild data with various quote styles
-        h=h.replace(/\{\s*(?:&quot;|\u201c|\u201d|"|&#34;|[\ufffd])\s*(?:guild|title|quests)[\s\S]{20,5000}?(?:quests|objs)\s*(?:&quot;|\u201c|\u201d|"|&#34;|[\ufffd])\s*:\s*\[[\s\S]*?\]\s*\}/gi,function(){touched=true;return '';});
-        // Catch individual quest objects with title+objs (common AI leak pattern)
-        h=h.replace(/\{\s*(?:&quot;|\u201c|\u201d|"|&#34;|[\ufffd])?\s*title\s*(?:&quot;|\u201c|\u201d|"|&#34;|[\ufffd])?\s*:[\s\S]{10,2000}?objs[\s\S]{0,200}?\[[^\]]*\]\s*\}/gi,function(){touched=true;return '';});
-        // Catch raw text blocks that look like JSON quest dumps (with replacement char)
-        h=h.replace(/\{\s*\ufffd\s*(?:&quot;|"|[\u201c\u201d])[\s\S]{20,5000}?\]\s*\}(?:\s*,?\s*\{[\s\S]{20,5000}?\]\s*\})*/gi,function(){touched=true;return '';});
-        // Ultra-broad: any block starting with { and containing "guild" + "quests" pattern (any quote chars)
-        h=h.replace(/\{[^{}]{0,50}(?:guild|гильд)[^{}]{0,200}(?:quests|квест)[\s\S]{10,8000}?\]\s*\}/gi,function(){touched=true;return '';});
-        // Catch JSON with replacement characters (ufffd) surrounding keys - the screenshot pattern
-        h=h.replace(/\{\s*[\ufffd\u{fffd}]\s*[^{}]{0,30}guild[\s\S]{10,8000}?\]\s*\}/giu,function(){touched=true;return '';});
-        // Fallback: any visible text containing "guild" : "..." , "quests" : [ pattern
-        h=h.replace(/\{\s*.{0,5}guild.{0,5}\s*:\s*.{0,5}[^\n]{3,100}.{0,5}quests.{0,5}\s*:\s*\[[\s\S]*?\]\s*\}/gi,function(){touched=true;return '';});
-        // Clean empty paragraphs and stray commas left behind
-        h=h.replace(/<p>\s*<\/p>/gi,'');
-        if(touched) h=h.replace(/^\s*[,\s]+\s*$/g,'').replace(/(?:^|\n)\s*,\s*(?:\n|$)/g,'\n');
-        if(h!==orig) el.innerHTML=h;
-    }
-}
-
-// ── Toast ──
-function toast(text,type){
-    var old=document.querySelector('.gq-toast');if(old)old.remove();
-    var t=document.createElement('div');
-    t.className='gq-toast'+(type?' gq-toast-'+type:'');
-    t.textContent=text;
-    document.body.appendChild(t);
-    setTimeout(function(){t.classList.add('out');},2800);
-    setTimeout(function(){t.remove();},3300);
-}
-
-function resetUILayout(showToast){
-    _ui=defUI();
-    saveState();
-    applyUILayout();
-    if(showToast)toast('\u21BB Положение и размер виджета сброшены','info');
-}
-
-function initWidgetInteractions(fab,panel,dragHandle,resizeHandle){
-    if(!fab||!panel)return;
-
-    function enableFabDrag(){
-        var st={on:false,id:null,sx:0,sy:0,ox:0,oy:0,moved:false};
-        fab.addEventListener('pointerdown',function(e){
-            if(e.button!==undefined&&e.button!==0)return;
-            e.preventDefault();e.stopPropagation();
-            var r=fab.getBoundingClientRect();
-            st.on=true;st.id=e.pointerId;st.sx=e.clientX;st.sy=e.clientY;st.ox=r.left;st.oy=r.top;st.moved=false;
-            try{fab.setPointerCapture(e.pointerId);}catch(err){}
-        });
-        fab.addEventListener('pointermove',function(e){
-            if(!st.on||e.pointerId!==st.id)return;
-            var dx=e.clientX-st.sx,dy=e.clientY-st.sy;
-            if(Math.abs(dx)>4||Math.abs(dy)>4)st.moved=true;
-            var r=fab.getBoundingClientRect();
-            var nx=clamp(st.ox+dx,4,Math.max(4,vpW()-r.width-4));
-            var ny=clamp(st.oy+dy,4,Math.max(4,vpH()-r.height-4));
-            fab.style.left=nx+'px';fab.style.top=ny+'px';fab.style.right='auto';fab.style.bottom='auto';
-        });
-        function finish(e){
-            if(!st.on||e.pointerId!==st.id)return;
-            try{fab.releasePointerCapture(e.pointerId);}catch(err){}
-            st.on=false;
-            if(st.moved){
-                var r=fab.getBoundingClientRect();
-                _ui.fab.x=r.left;_ui.fab.y=r.top;saveState();
-            }else togglePanel();
-        }
-        fab.addEventListener('pointerup',finish);
-        fab.addEventListener('pointercancel',finish);
-    }
-
-    function enablePanelDrag(){
-        if(!dragHandle)return;
-        var st={on:false,id:null,sx:0,sy:0,ox:0,oy:0};
-        dragHandle.addEventListener('pointerdown',function(e){
-            if(e.button!==undefined&&e.button!==0)return;
-            e.preventDefault();e.stopPropagation();
-            var r=panel.getBoundingClientRect();
-            st.on=true;st.id=e.pointerId;st.sx=e.clientX;st.sy=e.clientY;st.ox=r.left;st.oy=r.top;
-            panel.style.right='auto';panel.style.bottom='auto';
-            try{dragHandle.setPointerCapture(e.pointerId);}catch(err){}
-        });
-        dragHandle.addEventListener('pointermove',function(e){
-            if(!st.on||e.pointerId!==st.id)return;
-            var r=panel.getBoundingClientRect();
-            var nx=clamp(st.ox+(e.clientX-st.sx),4,Math.max(4,vpW()-r.width-4));
-            var ny=clamp(st.oy+(e.clientY-st.sy),4,Math.max(4,vpH()-r.height-4));
-            panel.style.left=nx+'px';panel.style.top=ny+'px';
-        });
-        function finish(e){
-            if(!st.on||e.pointerId!==st.id)return;
-            try{dragHandle.releasePointerCapture(e.pointerId);}catch(err){}
-            st.on=false;
-            var r=panel.getBoundingClientRect();
-            _ui.panel.x=r.left;_ui.panel.y=r.top;saveState();
-        }
-        dragHandle.addEventListener('pointerup',finish);
-        dragHandle.addEventListener('pointercancel',finish);
-    }
-
-    function enablePanelResize(){
-        if(!resizeHandle)return;
-        var st={on:false,id:null,sx:0,sy:0,ow:0,oh:0};
-        resizeHandle.addEventListener('pointerdown',function(e){
-            if(e.button!==undefined&&e.button!==0)return;
-            e.preventDefault();e.stopPropagation();
-            var r=panel.getBoundingClientRect();
-            st.on=true;st.id=e.pointerId;st.sx=e.clientX;st.sy=e.clientY;st.ow=r.width;st.oh=r.height;
-            panel.style.right='auto';panel.style.bottom='auto';
-            try{resizeHandle.setPointerCapture(e.pointerId);}catch(err){}
-        });
-        resizeHandle.addEventListener('pointermove',function(e){
-            if(!st.on||e.pointerId!==st.id)return;
-            var nw=clamp(st.ow+(e.clientX-st.sx),panelMinW(),panelMaxW());
-            var nh=clamp(st.oh+(e.clientY-st.sy),panelMinH(),panelMaxH());
-            panel.style.width=nw+'px';panel.style.height=nh+'px';
-            applyUILayout();
-        });
-        function finish(e){
-            if(!st.on||e.pointerId!==st.id)return;
-            try{resizeHandle.releasePointerCapture(e.pointerId);}catch(err){}
-            st.on=false;
-            var r=panel.getBoundingClientRect();
-            _ui.panel.w=r.width;_ui.panel.h=r.height;
-            _ui.panel.x=r.left;_ui.panel.y=r.top;
-            saveState();
-        }
-        resizeHandle.addEventListener('pointerup',finish);
-        resizeHandle.addEventListener('pointercancel',finish);
-    }
-
-    enableFabDrag();
-    enablePanelDrag();
-    enablePanelResize();
-    window.addEventListener('resize',function(){applyUILayout();});
-}
-
-// ── Auto-check objectives ──
-function autoCheck(text){
-    if(!_active||!_active.objs)return false;
-    var re=new RegExp(DONE_RE.source,'gi'),m,changed=false;
-    while((m=re.exec(text))!==null){
-        var dt=(m[1]||'').trim().toLowerCase();if(!dt)continue;
-        for(var i=0;i<_active.objs.length;i++){
-            var o=_active.objs[i];
-            if(!o.done){
-                var ol=o.text.toLowerCase();
-                if(ol.indexOf(dt)!==-1||dt.indexOf(ol)!==-1){o.done=true;changed=true;}
-            }
-        }
-    }
-    if(changed){
-        saveState();updateBadge();
-        var dn=_active.objs.filter(function(o){return o.done;}).length;
-        var tn=_active.objs.length;
-        if(dn===tn&&tn>0){
-            doComplete(true);
-            return true;
-        }
-        else toast('\u2713 Цель отмечена! ('+dn+'/'+tn+')','info');
-        if(_panelOpen&&_curTab==='active')renderActive();
-    }
-    return changed;
-}
-
-// ── UI: FAB + Panel ──
-function createUI(){
-    if(document.getElementById('gq-fab'))return;
-    var fab=document.createElement('div');
-    fab.id='gq-fab';fab.className='gq-fab';fab.innerHTML='\u2694';fab.title='Доска заданий гильдии';
-    document.body.appendChild(fab);
-
-    var panel=document.createElement('div');
-    panel.id='gq-panel';panel.className='gq-panel';
-    panel.innerHTML='<div class="gq-tabs">'
-        +'<button class="gq-layout-reset" id="gq-layout-reset" title="Сбросить положение">\u21BB</button>'
-        +'<div class="gq-drag" id="gq-drag" title="Перетащить">⋮⋮</div>'
-        +'<div class="gq-tab active" data-tab="board"><i class="fa-solid fa-scroll"></i> Доска</div>'
-        +'<div class="gq-tab" data-tab="active"><i class="fa-solid fa-crosshairs"></i> Задание</div>'
-        +'<div class="gq-tab" data-tab="profile"><i class="fa-solid fa-user"></i> Профиль</div>'
-        +'<div class="gq-tab" data-tab="achievements"><i class="fa-solid fa-trophy"></i> Достижения</div>'
-        +'<div class="gq-tab" data-tab="settings"><i class="fa-solid fa-gear"></i> API</div>'
-        +'<button class="gq-close" id="gq-close" title="Закрыть">\u2715</button>'
-        +'</div>'
-        +'<div class="gq-content">'
-        +'<div class="gq-view active" data-view="board" id="gq-v-board"></div>'
-        +'<div class="gq-view" data-view="active" id="gq-v-active"></div>'
-        +'<div class="gq-view" data-view="profile" id="gq-v-profile"></div>'
-        +'<div class="gq-view" data-view="achievements" id="gq-v-achs"></div>'
-        +'<div class="gq-view" data-view="settings" id="gq-v-settings"></div>'
-        +'</div>'
-        +'<div class="gq-resize" id="gq-resize" title="Изменить размер"></div>';
-    panel.addEventListener('click',function(e){e.stopPropagation();});
-    document.body.appendChild(panel);
-
-    var tabs=panel.querySelectorAll('.gq-tab');
-    for(var i=0;i<tabs.length;i++){
-        (function(tab){tab.addEventListener('click',function(){switchTab(tab.getAttribute('data-tab'));});})(tabs[i]);
-    }
-    var closeBtn=document.getElementById('gq-close');
-    if(closeBtn)closeBtn.addEventListener('click',function(e){e.stopPropagation();closePanel();});
-    var resetBtn=document.getElementById('gq-layout-reset');
-    if(resetBtn)resetBtn.addEventListener('click',function(e){e.preventDefault();e.stopPropagation();resetUILayout(true);});
-    initWidgetInteractions(
-        fab,panel,
-        document.getElementById('gq-drag'),
-        document.getElementById('gq-resize')
+    document.getElementById("ag-prev").addEventListener("click", () => navigate(-1));
+    document.getElementById("ag-next").addEventListener("click", () => navigate(1));
+    document.getElementById("ag-set-btn").addEventListener("click", applySelected);
+    document.getElementById("ag-upload-btn").addEventListener("click", () =>
+        document.getElementById("ag-file-input").click()
     );
-    applyUILayout();
-    document.addEventListener('click',function(e){
-        var inFab=!!(e.target&&(e.target.id==='gq-fab'||(e.target.closest&&e.target.closest('#gq-fab'))));
-        if(_panelOpen&&!panel.contains(e.target)&&!inFab)closePanel();
+    document.getElementById("ag-file-input").addEventListener("change", onFilesChosen);
+
+    // Keyboard
+    document.addEventListener("keydown", e => {
+        if (!document.getElementById("ag-modal").classList.contains("ag-open")) return;
+        if (e.key === "ArrowLeft")  navigate(-1);
+        if (e.key === "ArrowRight") navigate(1);
+        if (e.key === "Escape")     closeModal();
+        if (e.key === "Enter")      applySelected();
     });
 }
 
-function togglePanel(){if(_panelOpen)closePanel();else openPanel();}
-function openPanel(){_panelOpen=true;var p=document.getElementById('gq-panel');if(p){p.classList.add('open');applyUILayout();}refreshTab();}
-function closePanel(){_panelOpen=false;var p=document.getElementById('gq-panel');if(p)p.classList.remove('open');}
-function switchTab(t){
-    _curTab=t;var panel=document.getElementById('gq-panel');if(!panel)return;
-    var tabs=panel.querySelectorAll('.gq-tab'),views=panel.querySelectorAll('.gq-view');
-    for(var i=0;i<tabs.length;i++)tabs[i].classList.toggle('active',tabs[i].getAttribute('data-tab')===t);
-    for(var j=0;j<views.length;j++)views[j].classList.toggle('active',views[j].getAttribute('data-view')===t);
-    refreshTab();
-}
-function refreshTab(){
-    if(_curTab==='board')renderBoard();
-    else if(_curTab==='active')renderActive();
-    else if(_curTab==='profile')renderProfile();
-    else if(_curTab==='achievements')renderAchs();
-    else if(_curTab==='settings')renderSettings();
+// ──────────────────────────────────────────────
+//  Modal state
+// ──────────────────────────────────────────────
+let _modalKey   = null;   // active char key in modal
+let _viewIdx    = 0;      // currently viewed index in gallery
+
+function openModal(key) {
+    buildModal();
+    _modalKey = key || currentCharKey();
+    if (!_modalKey) return;
+
+    const gallery = getGallery(_modalKey);
+
+    document.getElementById("ag-char-name").textContent = currentCharName();
+    document.getElementById("ag-modal").classList.add("ag-open");
+
+    _viewIdx = gallery.activeIdx >= 0 ? gallery.activeIdx : 0;
+    renderModal();
 }
 
-function updateBadge(){
-    var fab=document.getElementById('gq-fab');if(!fab)return;
-    var old=fab.querySelector('.gq-badge');if(old)old.remove();
-    if(_active){
-        fab.classList.add('has-active');
-        var dn=(_active.objs||[]).filter(function(o){return o.done;}).length;
-        var tn=(_active.objs||[]).length;
-        if(dn<tn){var b=document.createElement('span');b.className='gq-badge';b.textContent=String(tn-dn);fab.appendChild(b);}
-    }else{fab.classList.remove('has-active');}
+function closeModal() {
+    document.getElementById("ag-modal")?.classList.remove("ag-open");
 }
 
-// ── Render: Board ──
-function renderBoard(){
-    var el=document.getElementById('gq-v-board');if(!el)return;
-    applyCompletedFilter();
-    if(!_board||!_board.quests.length){
-        el.innerHTML='<div class="gq-empty"><i class="fa-solid fa-scroll"></i>'
-            +'<div>Доска пуста. Подойди к доске гильдии или нажми кнопку.</div>'
-            +'<button class="gq-btn gq-trigger" id="gq-trig">\uD83D\uDD04 Запросить доску</button></div>';
-        var btn=document.getElementById('gq-trig');
-        if(btn)btn.onclick=function(){_wantBoard=true;injectPrompt();btn.disabled=true;btn.textContent='\u2713 Ожидаем ответ...';};
+function renderModal() {
+    const gallery = getGallery(_modalKey);
+    const total   = gallery.avatars.length;
+    const img     = document.getElementById("ag-main-img");
+    const box     = document.getElementById("ag-main-box");
+    const counter = document.getElementById("ag-counter");
+    const prevBtn = document.getElementById("ag-prev");
+    const nextBtn = document.getElementById("ag-next");
+    const setBtn  = document.getElementById("ag-set-btn");
+    const thumbsEl= document.getElementById("ag-thumbs");
+
+    if (total === 0) {
+        img.src = "";
+        img.style.display = "none";
+        // Show empty state
+        let es = box.querySelector(".ag-empty-state");
+        if (!es) {
+            es = document.createElement("div");
+            es.className = "ag-empty-state";
+            es.innerHTML = `<div class="ag-empty-icon">🖼</div><div>Нет аватарок</div><div style="font-size:11px;opacity:.6">Загрузи первую!</div>`;
+            box.appendChild(es);
+        }
+        es.style.display = "flex";
+        counter.textContent = "0 / 0";
+        prevBtn.disabled = true;
+        nextBtn.disabled = true;
+        setBtn.style.display = "none";
+        thumbsEl.innerHTML = "";
         return;
     }
-    var b=_board,rc=rCls(b.rank);
-    var qh='';
-    for(var i=0;i<b.quests.length;i++){
-        var q=b.quests[i],dc=rCls(q.diff);
-        var typeInfo=QT[q.type]||QT.GUILD;
-        qh+='<div class="gq-quest">'
-            +'<div class="gq-qtop">'
-            +'<span class="gq-diff '+dc+'">'+esc(q.diff||'?')+'</span>'
-            +'<span class="gq-qtype" title="'+esc(typeInfo.ru)+'">'+typeInfo.icon+'</span>'
-            +'<span class="gq-qtitle">'+esc(q.title)+'</span>'
-            +(q.storyLink?'<span class="gq-story-badge">\u2726</span>':'')
-            +'</div>'
-            +'<div class="gq-qdesc">'+esc(q.desc)+'</div>'
-            +'<div class="gq-qmeta">'
-            +(q.client?'<span><i class="fa-solid fa-user"></i>'+esc(q.client)+'</span>':'')
-            +(q.deadline?'<span><i class="fa-solid fa-hourglass-half"></i>'+esc(q.deadline)+'</span>':'')
-            +(q.reward?'<span class="gq-reward"><i class="fa-solid fa-coins"></i>'+esc(q.reward)+'</span>':'')
-            +(q.location?'<span><i class="fa-solid fa-location-dot"></i>'+esc(q.location)+'</span>':'')
-            +'</div>'
-            +'<div class="gq-qfoot">'
-            +'<span class="gq-qtype-label">'+esc(typeInfo.ru)+'</span>'
-            +'<button class="gq-btn gq-btn-sm gq-accept" data-qi="'+i+'">\u269C \u041F\u0440\u0438\u043D\u044F\u0442\u044C</button>'
-            +'</div>'
-            +'</div>';
-    }
-    el.innerHTML='<div class="gq-hdr">'
-        +'<div><div class="gq-guild">\u2694 '+esc(b.guild)+'</div>'
-        +(b.loc?'<div class="gq-loc">\u2014 '+esc(b.loc)+' \u2014</div>':'')
-        +'</div><div class="gq-rank-badge '+rc+'">\u0420\u0430\u043D\u0433 '+esc(b.rank)+'</div></div>'+qh;
 
-    var btns=el.querySelectorAll('.gq-accept');
-    for(var j=0;j<btns.length;j++){
-        (function(btn){
-            btn.onclick=function(ev){
-                ev.preventDefault();
-                var qi=parseInt(btn.getAttribute('data-qi'),10),q=b.quests[qi];if(!q)return;
-                doAccept({guild:b.guild,loc:b.loc,rank:b.rank,title:q.title,desc:q.desc,diff:q.diff,
-                    type:q.type,reward:q.reward,client:q.client,deadline:q.deadline,location:q.location,
-                    notes:q.notes,storyLink:q.storyLink,
-                    objs:q.objs.map(function(o){return{text:o.text,done:false};})});
-            };
-        })(btns[j]);
-    }
-}
+    // Hide empty state
+    const es = box.querySelector(".ag-empty-state");
+    if (es) es.style.display = "none";
+    img.style.display = "block";
 
-// ── Render: Active ──
-function renderActive(){
-    var el=document.getElementById('gq-v-active');if(!el)return;
-    if(!_active){
-        el.innerHTML='<div class="gq-empty"><i class="fa-solid fa-crosshairs"></i><div>\u041D\u0435\u0442 \u0430\u043A\u0442\u0438\u0432\u043D\u043E\u0433\u043E \u0437\u0430\u0434\u0430\u043D\u0438\u044F.</div></div>';
-        return;
-    }
-    var a=_active,dc=rCls(a.diff),typeInfo=QT[a.type]||QT.GUILD;
-    var dn=(a.objs||[]).filter(function(o){return o.done;}).length;
-    var tn=(a.objs||[]).length,allDone=tn>0&&dn===tn;
-    var oh='';
-    for(var i=0;i<(a.objs||[]).length;i++){
-        var o=a.objs[i];
-        oh+='<div class="gq-obj'+(o.done?' done':'')+'" data-oi="'+i+'"><div class="gq-ocheck"></div><div class="gq-otext">'+esc(o.text)+'</div></div>';
-    }
-    el.innerHTML='<div class="gq-alabel">\u25B8 '+typeInfo.icon+' '+esc(typeInfo.ru)+' \u0437\u0430\u0434\u0430\u043D\u0438\u0435 \u25C2</div>'
-        +'<div class="gq-atitle"><span class="gq-diff '+dc+'">'+esc(a.diff)+'</span><span>'+esc(a.title)+(allDone?' \u2713':'')+'</span></div>'
-        +(a.desc?'<div class="gq-adesc">'+esc(a.desc)+'</div>':'')
-        +(a.storyLink?'<div class="gq-story-note">\u2726 \u0421\u0432\u044F\u0437\u0430\u043D\u043E \u0441 \u0441\u044E\u0436\u0435\u0442\u043E\u043C</div>':'')
-        +'<div class="gq-ameta">'
-        +(a.client?'<span><i class="fa-solid fa-user"></i>'+esc(a.client)+'</span>':'')
-        +(a.deadline?'<span><i class="fa-solid fa-hourglass-half"></i>'+esc(a.deadline)+'</span>':'')
-        +(a.reward?'<span class="gq-reward"><i class="fa-solid fa-coins"></i>'+esc(a.reward)+'</span>':'')
-        +(a.location?'<span><i class="fa-solid fa-location-dot"></i>'+esc(a.location)+'</span>':'')
-        +'</div>'
-        +'<div class="gq-objs"><div class="gq-ohdr"><span>\u25C8 \u0426\u0435\u043B\u0438 \u25C8</span><span class="gq-oprog">'+dn+' / '+tn+'</span></div>'
-        +'<div class="gq-olist">'+oh+'</div></div>'
-        +'<div class="gq-aact">'
-        +'<button class="gq-abandon" id="gq-abandon">\u2715 \u041E\u0442\u043A\u0430\u0437\u0430\u0442\u044C\u0441\u044F</button>'
-        +'<button class="gq-complete'+(allDone?' visible':'')+'" id="gq-complete">\u2726 \u0421\u0434\u0430\u0442\u044C</button>'
-        +'</div>';
+    if (_viewIdx >= total) _viewIdx = total - 1;
+    if (_viewIdx < 0) _viewIdx = 0;
 
-    var objs=el.querySelectorAll('.gq-obj');
-    for(var k=0;k<objs.length;k++){
-        (function(obj){obj.onclick=function(){
-            var idx=parseInt(obj.getAttribute('data-oi'),10);
-            if(_active&&_active.objs[idx]){_active.objs[idx].done=!_active.objs[idx].done;saveState();renderActive();updateBadge();}
-        };})(objs[k]);
-    }
-    var abBtn=document.getElementById('gq-abandon');if(abBtn)abBtn.onclick=function(){doAbandon();};
-    var coBtn=document.getElementById('gq-complete');if(coBtn)coBtn.onclick=function(){doComplete();};
-}
+    const cur = gallery.avatars[_viewIdx];
+    const isActive = _viewIdx === gallery.activeIdx;
 
-// ── Render: Profile ──
-function renderProfile(){
-    var el=document.getElementById('gq-v-profile');if(!el)return;
-    var p=getProfile(),rc=rCls(p.rank);
-    var ni=RANKS.indexOf(p.rank)+1,nk=ni<RANKS.length?RANKS[ni]:'SSS';
-    var toNext=RANK_TH[nk]-p.completed;if(toNext<0)toNext=0;
-    var pct=ni<RANKS.length?Math.min(100,Math.round((p.completed-RANK_TH[p.rank])/(RANK_TH[nk]-RANK_TH[p.rank])*100)):100;
+    // Animate image swap
+    img.classList.add("ag-img-fade");
+    setTimeout(() => {
+        img.src = cur.src;
+        img.classList.remove("ag-img-fade");
+    }, 130);
 
-    // Title display
-    var titleName='';
-    if(p.activeTitle){var tf=TITLES.find(function(t){return t.id===p.activeTitle;});if(tf)titleName=tf.name;}
+    box.classList.toggle("ag-is-active", isActive);
+    counter.textContent = `${_viewIdx + 1} / ${total}`;
+    prevBtn.disabled = total <= 1;
+    nextBtn.disabled = total <= 1;
 
-    // Reputation
-    var repH='';
-    var repKeys=Object.keys(p.reputation||{});
-    if(repKeys.length){
-        for(var r=0;r<repKeys.length;r++){
-            repH+='<div class="gq-prep"><span>'+esc(repKeys[r])+'</span><span class="gq-prep-val">'+p.reputation[repKeys[r]]+' \u2764</span></div>';
-        }
-    }else{repH='<div class="gq-pempty">\u041D\u0435\u0442 \u0440\u0435\u043F\u0443\u0442\u0430\u0446\u0438\u0438</div>';}
-
-    // History
-    var histH='';
-    if(p.history&&p.history.length){
-        var rev=p.history.slice().reverse().slice(0,30);
-        for(var i=0;i<rev.length;i++){
-            var h=rev[i],hdc=rCls(h.diff),ti=QT[h.type]||QT.GUILD;
-            histH+='<div class="gq-phist"><span><span class="gq-diff-sm '+hdc+'">'+esc(h.diff)+'</span>'+ti.icon+' '+esc(h.title)+'</span><span class="gq-hreward">+'+esc(h.gold)+'\u0437\u043C</span></div>';
-        }
-    }else{histH='<div class="gq-pempty">\u041D\u0435\u0442 \u0438\u0441\u0442\u043E\u0440\u0438\u0438</div>';}
-
-    var avatarH=p.avatar
-        ?'<div class="gq-pavatar"><img src="'+esc(p.avatar)+'" class="gq-pavatar-img" onerror="this.parentNode.innerHTML=\'⚔\'"></div>'
-        :'<div class="gq-pavatar">\u2694</div>';
-
-    el.innerHTML='<div class="gq-profile">'
-        +avatarH
-        +'<div class="gq-pname">'+esc(p.name)+'</div>'
-        +(titleName?'<div class="gq-ptitle">\u00AB'+esc(titleName)+'\u00BB</div>':'')
-        +'<div class="gq-prank"><span class="gq-rank-badge '+rc+'">\u0420\u0430\u043D\u0433 '+esc(p.rank)+'</span></div>'
-        +'<div class="gq-progress-bar"><div class="gq-progress-fill" style="width:'+pct+'%"></div><span class="gq-progress-text">'+pct+'% \u0434\u043E '+esc(nk)+'</span></div>'
-        +'<div class="gq-pstats">'
-        +'<div class="gq-pstat"><div class="gq-pstat-val"><i class="fa-solid fa-coins" style="color:#d4b876;margin-right:4px"></i>'+p.gold+'</div><div class="gq-pstat-lbl">\u0417\u043E\u043B\u043E\u0442\u043E</div></div>'
-        +'<div class="gq-pstat"><div class="gq-pstat-val">'+p.completed+'</div><div class="gq-pstat-lbl">\u0412\u044B\u043F\u043E\u043B\u043D\u0435\u043D\u043E</div></div>'
-        +'<div class="gq-pstat"><div class="gq-pstat-val">'+(p.history?p.history.length:0)+'</div><div class="gq-pstat-lbl">\u0412\u0441\u0435\u0433\u043E</div></div>'
-        +'<div class="gq-pstat"><div class="gq-pstat-val">'+toNext+'</div><div class="gq-pstat-lbl">\u0414\u043E \u0440\u0430\u043D\u0433\u0430</div></div>'
-        +'</div>'
-        +'<div class="gq-section-title">\u2764 \u0420\u0435\u043F\u0443\u0442\u0430\u0446\u0438\u044F</div>'
-        +'<div class="gq-prep-list">'+repH+'</div>'
-        +'<div class="gq-section-title">\uD83D\uDCDC \u0418\u0441\u0442\u043E\u0440\u0438\u044F</div>'
-        +'<div class="gq-phist-list">'+histH+'</div>'
-        +'</div>';
-}
-
-// ── Render: Achievements ──
-function renderAchs(){
-    var el=document.getElementById('gq-v-achs');if(!el)return;
-    var p=getProfile();
-
-    // Titles section
-    var tH='';
-    for(var i=0;i<TITLES.length;i++){
-        var t=TITLES[i],unlocked=p.titles.includes(t.id);
-        var isActive=p.activeTitle===t.id;
-        tH+='<div class="gq-ach-item'+(unlocked?' unlocked':'')+(isActive?' active-title':'')+'" data-tid="'+t.id+'">'
-            +'<span class="gq-ach-icon">'+(unlocked?'\u2605':'\u2606')+'</span>'
-            +'<span class="gq-ach-name">'+esc(t.name)+'</span>'
-            +(isActive?'<span class="gq-ach-active">\u2190 \u0430\u043A\u0442\u0438\u0432\u043D\u044B\u0439</span>':'')
-            +'</div>';
+    setBtn.style.display = "";
+    if (isActive) {
+        setBtn.textContent = "✓ Активна";
+        setBtn.classList.add("ag-active-btn");
+    } else {
+        setBtn.textContent = "✓ Выбрать";
+        setBtn.classList.remove("ag-active-btn");
     }
 
-    // Achievements section
-    var aH='';
-    for(var j=0;j<ACHS.length;j++){
-        var a=ACHS[j],done=p.achievements.includes(a.id);
-        aH+='<div class="gq-ach-item'+(done?' unlocked':'')+'">'
-            +'<span class="gq-ach-icon">'+(done?'\uD83C\uDFC6':'\uD83D\uDD12')+'</span>'
-            +'<div><div class="gq-ach-name">'+esc(a.name)+'</div><div class="gq-ach-desc">'+esc(a.desc)+'</div></div>'
-            +'</div>';
-    }
+    // Thumbnails
+    thumbsEl.innerHTML = "";
+    gallery.avatars.forEach((av, i) => {
+        const wrap = document.createElement("div");
+        wrap.className = "ag-thumb-wrap";
 
-    el.innerHTML='<div class="gq-section-title">\u2B50 \u0422\u0438\u0442\u0443\u043B\u044B ('+p.titles.length+'/'+TITLES.length+')</div>'
-        +'<div class="gq-ach-note">\u041D\u0430\u0436\u043C\u0438 \u043D\u0430 \u0440\u0430\u0437\u0431\u043B\u043E\u043A\u0438\u0440\u043E\u0432\u0430\u043D\u043D\u044B\u0439, \u0447\u0442\u043E\u0431\u044B \u0443\u0441\u0442\u0430\u043D\u043E\u0432\u0438\u0442\u044C</div>'
-        +'<div class="gq-ach-list">'+tH+'</div>'
-        +'<div class="gq-section-title">\uD83C\uDFC6 \u0414\u043E\u0441\u0442\u0438\u0436\u0435\u043D\u0438\u044F ('+p.achievements.length+'/'+ACHS.length+')</div>'
-        +'<div class="gq-ach-list">'+aH+'</div>';
+        const t = document.createElement("img");
+        t.className = "ag-thumb" + (i === _viewIdx ? " ag-thumb-active" : "");
+        t.src = av.src;
+        t.title = av.label || `Аватар ${i + 1}`;
+        t.addEventListener("click", () => { _viewIdx = i; renderModal(); });
 
-    // Title click to set active
-    var items=el.querySelectorAll('.gq-ach-item[data-tid]');
-    for(var k=0;k<items.length;k++){
-        (function(item){
-            item.onclick=function(){
-                var tid=item.getAttribute('data-tid');
-                if(!p.titles.includes(tid))return;
-                if(p.activeTitle===tid)p.activeTitle='';else p.activeTitle=tid;
-                saveProfile(p);renderAchs();
-                toast(p.activeTitle?'\u2B50 \u0422\u0438\u0442\u0443\u043B: '+TITLES.find(function(t){return t.id===tid;}).name:'\u0422\u0438\u0442\u0443\u043B \u0441\u043D\u044F\u0442');
-            };
-        })(items[k]);
-    }
-}
+        const del = document.createElement("button");
+        del.className = "ag-thumb-del";
+        del.title = "Удалить";
+        del.textContent = "✕";
+        del.addEventListener("click", e => { e.stopPropagation(); deleteAvatar(i); });
 
-// ── Fetch models from API ──
-async function fetchModelsFromApi(){
-    var cfg=getExtraApi();
-    if(!cfg.url)return [];
-    var baseUrl=cfg.url.replace(/\/chat\/completions\/?$/,'').replace(/\/completions\/?$/,'').replace(/\/+$/,'');
-    var modelsUrl=baseUrl+'/models';
-    var headers={};
-    if(cfg.key){headers.Authorization='Bearer '+cfg.key;headers['X-API-Key']=cfg.key;}
-    try{
-        var res=await fetch(modelsUrl,{method:'GET',headers:headers});
-        if(!res.ok)return [];
-        var json=await res.json();
-        if(json&&Array.isArray(json.data)){
-            return json.data.map(function(m){return{id:m.id||'',name:m.id||''};}).filter(function(m){return m.id;});
-        }
-        if(Array.isArray(json)){
-            return json.map(function(m){return{id:typeof m==='string'?m:m.id||'',name:typeof m==='string'?m:m.id||''};}).filter(function(m){return m.id;});
-        }
-    }catch(e){}
-    return [];
-}
-
-// ── Render: Settings (Extra API) ──
-function renderSettings(){
-    var el=document.getElementById('gq-v-settings');if(!el)return;
-    var cfg=getExtraApi();
-    var modelOpts='<option value="">— Выберите модель —</option>';
-    var foundModel=false;
-    for(var i=0;i<EXTRA_MODELS.length;i++){
-        var m=EXTRA_MODELS[i];
-        var sel=(cfg.model===m.id);
-        if(sel)foundModel=true;
-        modelOpts+='<option value="'+esc(m.id)+'"'+(sel?' selected':'')+'>'+esc(m.name)+'</option>';
-    }
-    if(cfg.model&&!foundModel){
-        modelOpts+='<option value="'+esc(cfg.model)+'" selected>'+esc(cfg.model)+' (своя)</option>';
-    }
-
-    el.innerHTML='<div class="gq-settings">'
-        +'<div class="gq-section-title"><i class="fa-solid fa-robot"></i> Extra API</div>'
-        +'<label class="gq-set-toggle">'
-        +'<input type="checkbox" id="gq-set-enabled"'+(cfg.enabled?' checked':'')+'>'
-        +'<span class="gq-set-toggle-label">Включить Extra API</span>'
-        +'</label>'
-        +'<div class="gq-set-group">'
-        +'<label class="gq-set-label">URL (эндпоинт или прокси)</label>'
-        +'<input type="text" class="gq-set-input" id="gq-set-url" value="'+esc(cfg.url)+'" placeholder="https://api.openai.com/v1/chat/completions">'
-        +'</div>'
-        +'<div class="gq-set-group">'
-        +'<label class="gq-set-label">API Ключ</label>'
-        +'<input type="password" class="gq-set-input" id="gq-set-key" value="'+esc(cfg.key)+'" placeholder="sk-...">'
-        +'</div>'
-        +'<div class="gq-set-group">'
-        +'<label class="gq-set-label">Модель</label>'
-        +'<div class="gq-set-model-row">'
-        +'<select class="gq-set-input" id="gq-set-model">'+modelOpts+'</select>'
-        +'<button class="gq-btn-fetch-models" id="gq-fetch-models" title="Загрузить модели с API"><i class="fa-solid fa-rotate"></i></button>'
-        +'</div>'
-        +'</div>'
-        +'<div class="gq-set-group" id="gq-set-custom-model-wrap" style="display:'+(cfg.model==='custom'||(!foundModel&&cfg.model)?'block':'none')+'">'
-        +'<input type="text" class="gq-set-input" id="gq-set-custom-model" value="'+esc(cfg.model==='custom'?'':cfg.model)+'" placeholder="Имя модели">'
-        +'</div>'
-        +'<div class="gq-set-group">'
-        +'<label class="gq-set-label">Макс. токенов</label>'
-        +'<input type="number" class="gq-set-input" id="gq-set-tokens" value="'+(cfg.maxTokens||800)+'" min="100" max="4000" step="100">'
-        +'</div>'
-        +'<div class="gq-set-actions">'
-        +'<button class="gq-btn gq-btn-save" id="gq-set-save"><i class="fa-solid fa-floppy-disk"></i> Сохранить</button>'
-        +'<button class="gq-btn gq-btn-test" id="gq-set-test"><i class="fa-solid fa-vial"></i> Тест</button>'
-        +'</div>'
-        +'<div id="gq-set-status" class="gq-set-status"></div>'
-        +'</div>';
-
-    // Model select change → show/hide custom input
-    var selModel=document.getElementById('gq-set-model');
-    var customWrap=document.getElementById('gq-set-custom-model-wrap');
-    if(selModel)selModel.addEventListener('change',function(){
-        if(customWrap)customWrap.style.display=(selModel.value==='custom')?'block':'none';
-    });
-
-    // Fetch models from API
-    var fetchBtn=document.getElementById('gq-fetch-models');
-    if(fetchBtn)fetchBtn.addEventListener('click',async function(){
-        var st=document.getElementById('gq-set-status');
-        if(st){st.textContent='⏳ Загрузка моделей...';st.className='gq-set-status';}
-        fetchBtn.disabled=true;
-        // Save URL/key first
-        var urlVal=(document.getElementById('gq-set-url').value||'').trim();
-        var keyVal=(document.getElementById('gq-set-key').value||'').trim();
-        var tmpCfg=normExtraApi({enabled:true,url:urlVal,key:keyVal,model:cfg.model,maxTokens:cfg.maxTokens});
-        _extraApi=tmpCfg;
-        var models=await fetchModelsFromApi();
-        fetchBtn.disabled=false;
-        if(models.length){
-            var sel=document.getElementById('gq-set-model');
-            if(sel){
-                var curVal=sel.value;
-                sel.innerHTML='<option value="">— Выберите модель —</option>';
-                for(var i=0;i<models.length;i++){
-                    var opt=document.createElement('option');
-                    opt.value=models[i].id;opt.textContent=models[i].name;
-                    if(models[i].id===curVal||models[i].id===cfg.model)opt.selected=true;
-                    sel.appendChild(opt);
-                }
-                var customOpt=document.createElement('option');
-                customOpt.value='custom';customOpt.textContent='Своя модель (ввести вручную)';
-                sel.appendChild(customOpt);
-            }
-            if(st){st.textContent='✓ Загружено моделей: '+models.length;st.className='gq-set-status gq-set-ok';}
-        }else{
-            if(st){st.textContent='✗ Не удалось загрузить модели';st.className='gq-set-status gq-set-err';}
-        }
-    });
-
-    // Save
-    var saveBtn=document.getElementById('gq-set-save');
-    if(saveBtn)saveBtn.addEventListener('click',function(){
-        var selVal=document.getElementById('gq-set-model').value;
-        var customVal=(document.getElementById('gq-set-custom-model')||{}).value||'';
-        var model=(selVal==='custom')?customVal.trim():selVal;
-        var newCfg={
-            enabled:document.getElementById('gq-set-enabled').checked,
-            url:(document.getElementById('gq-set-url').value||'').trim(),
-            key:(document.getElementById('gq-set-key').value||'').trim(),
-            model:model,
-            maxTokens:parseInt(document.getElementById('gq-set-tokens').value,10)||800,
-            headers:cfg.headers
-        };
-        saveExtraApi(newCfg);
-        toast('\u2713 Настройки сохранены','success');
-        var st=document.getElementById('gq-set-status');
-        if(st){st.textContent='\u2713 Сохранено';st.className='gq-set-status gq-set-ok';}
-    });
-
-    // Test connection
-    var testBtn=document.getElementById('gq-set-test');
-    if(testBtn)testBtn.addEventListener('click',async function(){
-        var st=document.getElementById('gq-set-status');
-        if(st){st.textContent='⏳ Проверка подключения...';st.className='gq-set-status';}
-        saveBtn.click();
-        var cfg2=getExtraApi();
-        if(!cfg2.url){if(st){st.textContent='✗ Укажите URL';st.className='gq-set-status gq-set-err';}return;}
-        try{
-            var result=await fetchExtraApi({task:'ping',test:true});
-            if(result!==null){
-                if(st){st.textContent='✓ Подключено! Соединение установлено.';st.className='gq-set-status gq-set-ok';}
-            }else{
-                if(st){st.textContent='✗ Не подключено. Нет ответа от сервера.';st.className='gq-set-status gq-set-err';}
-            }
-        }catch(e){
-            if(st){st.textContent='✗ Не подключено: '+String(e.message||e);st.className='gq-set-status gq-set-err';}
-        }
+        wrap.appendChild(t);
+        wrap.appendChild(del);
+        thumbsEl.appendChild(wrap);
     });
 }
 
-// ── Quest Actions ──
-function doAccept(quest){
-    var sig=questSig(quest);
-    if(sig&&_board&&Array.isArray(_board.quests)){
-        _board.quests=_board.quests.filter(function(q){return questSig(q)!==sig;});
-    }
-    _active=quest;saveState();updateBadge();switchTab('active');
-    toast('\u269C \u0417\u0430\u0434\u0430\u043D\u0438\u0435 \u043F\u0440\u0438\u043D\u044F\u0442\u043E!','success');
-}
-function doAbandon(){
-    _active=null;saveState();updateBadge();switchTab('board');
-    toast('\u2715 \u0417\u0430\u0434\u0430\u043D\u0438\u0435 \u043E\u0442\u043C\u0435\u043D\u0435\u043D\u043E','warn');
-}
-function doComplete(autoTurnIn){
-    if(!_active)return;
-    var a=_active,gold=pGold(a.reward),rep=RANK_REP[a.diff]||5;
-    if(a.type==='URGENT')gold=Math.round(gold*1.5);
-    var p=getProfile();
-    p.gold+=gold;p.completed++;
-    p.byType[a.type]=(p.byType[a.type]||0)+1;
-    if(a.guild){p.reputation[a.guild]=(p.reputation[a.guild]||0)+rep;}
-    p.history.push({title:a.title,diff:a.diff,type:a.type||'GUILD',reward:a.reward,gold:gold,date:new Date().toLocaleDateString()});
-    p.rank=calcRank(p);
-    var unlocks=checkUnlocks(p);
-    saveProfile(p);
-    var sig=questSig(a);
-    if(sig)_completed[sig]=true;
-    applyCompletedFilter();
-    _active=null;saveState();updateBadge();
-    notify((autoTurnIn?'\u2726 \u0417\u0430\u0434\u0430\u043D\u0438\u0435 \u0430\u0432\u0442\u043E-\u0441\u0434\u0430\u043D\u043E':'\u2726 \u0417\u0430\u0434\u0430\u043D\u0438\u0435 \u0432\u044B\u043F\u043E\u043B\u043D\u0435\u043D\u043E')+'! +'+gold+'\u0437\u043C'+(rep?' +'+rep+'\u2764':''),'success','Задание выполнено');
-    if(unlocks.titles.length)setTimeout(function(){toast('\u2B50 \u041D\u043E\u0432\u044B\u0439 \u0442\u0438\u0442\u0443\u043B: '+unlocks.titles.join(', '),'special');},800);
-    if(unlocks.achs.length)setTimeout(function(){toast('\uD83C\uDFC6 \u0414\u043E\u0441\u0442\u0438\u0436\u0435\u043D\u0438\u0435: '+unlocks.achs.join(', '),'special');},1500);
-    switchTab('profile');
+function navigate(dir) {
+    const gallery = getGallery(_modalKey);
+    if (!gallery || !gallery.avatars.length) return;
+    _viewIdx = (_viewIdx + dir + gallery.avatars.length) % gallery.avatars.length;
+    renderModal();
 }
 
-// ── System Prompt ──
-var SYSTEM_PROMPT = '[System Note: \u0418\u0433\u0440\u043E\u043A \u043F\u043E\u0434\u043E\u0448\u0451\u043B \u043A \u0434\u043E\u0441\u043A\u0435 \u043E\u0431\u044A\u044F\u0432\u043B\u0435\u043D\u0438\u0439 \u0433\u0438\u043B\u044C\u0434\u0438\u0438. \u0412 \u0421\u0410\u041C\u041E\u041C \u041D\u0410\u0427\u0410\u041B\u0415 \u043E\u0442\u0432\u0435\u0442\u0430 \u0432\u044B\u0432\u0435\u0434\u0438 \u0431\u043B\u043E\u043A \u0421\u0422\u0420\u041E\u0413\u041E \u0432 \u044D\u0442\u043E\u043C \u0444\u043E\u0440\u043C\u0430\u0442\u0435:\n\n<guild_board>\n{"guild":"\u041D\u0430\u0437\u0432\u0430\u043D\u0438\u0435\u0413\u0438\u043B\u044C\u0434\u0438\u0438","loc":"\u041C\u0435\u0441\u0442\u043E","rank":"\u0420\u0430\u043D\u0433\u0418\u0433\u0440\u043E\u043A\u0430","quests":[\n{"title":"\u041D\u0430\u0437\u0432\u0430\u043D\u0438\u0435","desc":"\u041E\u043F\u0438\u0441\u0430\u043D\u0438\u0435","diff":"F","type":"GUILD","reward":"50\u0437\u043C","client":"\u0418\u043C\u044F","deadline":"2 \u0434\u043D\u044F","location":"\u041B\u043E\u043A\u0430\u0446\u0438\u044F","storyLink":false,"objs":["\u0426\u0435\u043B\u044C1","\u0426\u0435\u043B\u044C2"]}\n]}\n</guild_board>\n\n\u041F\u0440\u0430\u0432\u0438\u043B\u0430:\n- \u0420\u0430\u043D\u0433/\u0421\u043B\u043E\u0436\u043D\u043E\u0441\u0442\u044C: F/E/D/C/B/A/S/SS/SSS\n- 3-4 \u0437\u0430\u0434\u0430\u043D\u0438\u044F, \u0441\u043E\u043E\u0442\u0432\u0435\u0442\u0441\u0442\u0432\u0443\u044E\u0449\u0438\u0445 \u0440\u0430\u043D\u0433\u0443 \u0438\u0433\u0440\u043E\u043A\u0430 (\u00B11 \u0440\u0430\u043D\u0433)\n- \u041D\u0430\u0433\u0440\u0430\u0434\u0430: F=30-80\u0437\u043C, E=80-150\u0437\u043C, D=150-300\u0437\u043C, C=300-600\u0437\u043C, B=600-1500\u0437\u043C, A=1500-5000\u0437\u043C, S=5000+\u0437\u043C\n- \u0422\u0438\u043F\u044B \u0437\u0430\u0434\u0430\u043D\u0438\u0439 (type): STORY, GUILD, SIDE, URGENT, HUNT, ESCORT, DUNGEON, INVESTIGATE, SPECIAL, RAID, DAILY\n- \u041E\u0434\u043D\u043E \u0438\u0437 \u0437\u0430\u0434\u0430\u043D\u0438\u0439 \u043C\u043E\u0436\u0435\u0442 \u0431\u044B\u0442\u044C STORY (\u0441\u0432\u044F\u0437\u0430\u043D\u043E \u0441 \u0441\u044E\u0436\u0435\u0442\u043E\u043C RP, storyLink:true)\n- \u0421\u0440\u043E\u0447\u043D\u044B\u0435 (URGENT) \u0434\u0430\u044E\u0442 x1.5 \u043D\u0430\u0433\u0440\u0430\u0434\u0443\n- objs: 2-4 \u0446\u0435\u043B\u0438 \u043A\u0430\u043A \u043C\u0430\u0441\u0441\u0438\u0432 \u0441\u0442\u0440\u043E\u043A\n- \u0417\u0430\u0434\u0430\u043D\u0438\u044F \u0434\u043E\u043B\u0436\u043D\u044B \u0431\u044B\u0442\u044C \u0440\u0430\u0437\u043D\u043E\u043E\u0431\u0440\u0430\u0437\u043D\u044B\u043C\u0438 \u0438 \u0438\u043D\u0442\u0435\u0440\u0435\u0441\u043D\u044B\u043C\u0438, \u043A\u0430\u043A \u0432 \u0430\u043D\u0438\u043C\u0435/\u043C\u0430\u043D\u0445\u0432\u0435 \u043F\u0440\u043E \u0433\u0438\u043B\u044C\u0434\u0438\u0438 \u0430\u0432\u0430\u043D\u0442\u044E\u0440\u0438\u0441\u0442\u043E\u0432\n- JSON \u0434\u043E\u043B\u0436\u0435\u043D \u0431\u044B\u0442\u044C \u0432\u0430\u043B\u0438\u0434\u043D\u044B\u043C\n\n\u041A\u043E\u0433\u0434\u0430 \u0438\u0433\u0440\u043E\u043A \u0432\u044B\u043F\u043E\u043B\u043D\u044F\u0435\u0442 \u0446\u0435\u043B\u044C \u0430\u043A\u0442\u0438\u0432\u043D\u043E\u0433\u043E \u0437\u0430\u0434\u0430\u043D\u0438\u044F, \u043F\u043E\u043C\u0435\u0442\u044C:\n<gq_done>\u0442\u043E\u0447\u043D\u044B\u0439 \u0442\u0435\u043A\u0441\u0442 \u0446\u0435\u043B\u0438</gq_done>\n\n\u041F\u043E\u0441\u043B\u0435 </guild_board> \u2014 \u043E\u0431\u044B\u0447\u043D\u043E\u0435 \u043F\u043E\u0432\u0435\u0441\u0442\u0432\u043E\u0432\u0430\u043D\u0438\u0435.]';
-
-function injectPrompt(){
-    var prompt=SYSTEM_PROMPT+'\n\n[КРИТИЧЕСКИ ВАЖНО: Блок <guild_board>...</guild_board> — это СКРЫТЫЕ служебные данные. НИКОГДА не показывай JSON пользователю. Не выводи его в тексте сообщения. Не оборачивай в ``` код-блоки. Не переформатируй и не цитируй содержимое тега. Пиши тег <guild_board> СТРОГО один раз в самом начале, а после закрывающего </guild_board> сразу начинай обычное повествование. JSON внутри тега полностью невидим для пользователя.]';
-    var p=getProfile();
-    var recent=(p.history||[]).slice(-20).map(function(h){return String(h.title||'').trim();}).filter(Boolean);
-    if(recent.length){
-        prompt+='\n\n[Доп. правило: не предлагай повторно уже выполненные задания с названиями: '+recent.join('; ')+']';
-    }
-    setExtensionPrompt(EXT_ID,prompt,extension_prompt_types.IN_CHAT,0,true,false,null,extension_prompt_roles.SYSTEM);
-    _injected=true;
-    console.log('[GQ6] Prompt injected');
-}
-function clearPrompt(){
-    setExtensionPrompt(EXT_ID,'',extension_prompt_types.IN_CHAT,0);
-    _injected=false;
-}
-function shouldTrigger(){
-    if(_wantBoard)return true;
-    var ctx=null;
-    try{if(typeof SillyTavern!=='undefined'&&SillyTavern.getContext)ctx=SillyTavern.getContext();else if(typeof getContext==='function')ctx=getContext();}catch(e){}
-    if(!ctx||!ctx.chat||!ctx.chat.length)return false;
-    for(var i=ctx.chat.length-1;i>=0;i--){
-        var msg=ctx.chat[i];
-        if(msg&&msg.is_user&&msg.mes)return TRIGGER_RE.test(msg.mes);
-    }
-    return false;
-}
-
-// ── Scan messages ──
-function scanMessages(){
-    var ctx=null;
-    try{if(typeof SillyTavern!=='undefined'&&SillyTavern.getContext)ctx=SillyTavern.getContext();else if(typeof getContext==='function')ctx=getContext();}catch(e){}
-    if(!ctx||!ctx.chat)return;
-    for(var i=0;i<ctx.chat.length;i++){
-        var msg=ctx.chat[i];if(!msg||!msg.mes)continue;
-        var board=parseBoard(msg.mes);
-        if(board&&board.quests.length){
-            _board=board;
-            _lastBoardNoticeSig=boardSig(board)||_lastBoardNoticeSig;
-        }
-    }
-    applyCompletedFilter();
-    scrubChat();updateBadge();
-    if(_panelOpen)refreshTab();
-}
-
-// ── Process new message ──
-function processNew(){
-    var ctx=null;
-    try{if(typeof SillyTavern!=='undefined'&&SillyTavern.getContext)ctx=SillyTavern.getContext();else if(typeof getContext==='function')ctx=getContext();}catch(e){}
-    if(!ctx||!ctx.chat||!ctx.chat.length)return;
-    var last=ctx.chat[ctx.chat.length-1];
-    if(!last||!last.mes)return;
-    var text=last.mes;
-    var board=parseBoard(text);
-    if(board&&board.quests.length){
-        applyBoard(board);
-    }
-    autoCheck(text);
-    trackObjectivesByExtraApi(text);
-    scrubChat();
-    setTimeout(scrubChat,300);
-    _wantBoard=false;
-    if(_injected)clearPrompt();
+function deleteAvatar(idx) {
+    const gallery = getGallery(_modalKey);
+    gallery.avatars.splice(idx, 1);
+    if (gallery.activeIdx === idx) gallery.activeIdx = -1;
+    else if (gallery.activeIdx > idx) gallery.activeIdx--;
+    if (_viewIdx >= gallery.avatars.length) _viewIdx = Math.max(0, gallery.avatars.length - 1);
+    save();
+    renderModal();
     updateBadge();
 }
-function handleBoardTrigger(){
-    requestBoardFromExtraApi().then(function(ok){if(!ok)injectPrompt();});
+
+function applySelected() {
+    const gallery = getGallery(_modalKey);
+    if (!gallery || !gallery.avatars.length) return;
+    gallery.activeIdx = _viewIdx;
+    save();
+    renderModal();
+
+    // Apply to DOM: swap avatar images visible on screen
+    const src = gallery.avatars[_viewIdx].src;
+    applyAvatarToDOM(src);
 }
 
-// ── Init ──
-jQuery(function(){
-    try{
-        loadState();
-        createUI();updateBadge();
-        setTimeout(scanMessages,1000);
-
-        eventSource.on(event_types.MESSAGE_RECEIVED,function(){setTimeout(processNew,500);});
-        eventSource.on(event_types.MESSAGE_SWIPED,function(){setTimeout(function(){scanMessages();processNew();},500);});
-        eventSource.on(event_types.CHAT_CHANGED,function(){
-            _chatId=getChatId();
-            _board=null;loadState();_wantBoard=false;
-            if(_injected)clearPrompt();
-            _lastBoardNoticeSig='';
-            setTimeout(scanMessages,800);
+// ──────────────────────────────────────────────
+//  Apply avatar to SillyTavern UI
+// ──────────────────────────────────────────────
+function applyAvatarToDOM(src) {
+    // Character avatar in chat header / character info
+    const targets = [
+        "#ai_profile_pic",
+        ".mes_block .avatar img",
+        "#character_avatar_block img",
+        ".right-nav-panel .avatar img",
+        "#avatar_load_preview",
+    ];
+    targets.forEach(sel => {
+        document.querySelectorAll(sel).forEach(el => {
+            if (el.tagName === "IMG") el.src = src;
         });
-        eventSource.on(event_types.GENERATION_STARTED,function(){if(shouldTrigger())handleBoardTrigger();});
-        eventSource.on(event_types.GENERATION_ENDED,function(){_wantBoard=false;});
+    });
 
-        // Periodic scrub
-        setInterval(scrubChat,3000);
+    // Flash feedback
+    const setBtn = document.getElementById("ag-set-btn");
+    if (setBtn) {
+        setBtn.textContent = "✓ Активна";
+        setBtn.classList.add("ag-active-btn");
+    }
 
-        window.__gq={
-            openPanel:openPanel,getProfile:getProfile,saveProfile:saveProfile,
-            requestBoard:function(){_wantBoard=true;handleBoardTrigger();openPanel();switchTab('board');return'Board next.';},
-            resetProfile:function(){saveProfile(defProfile());if(_panelOpen)renderProfile();return'Reset.';},
-            resetLayout:function(){resetUILayout(false);return'Layout reset.';},
-            getExtraApi:getExtraApi,
-            setExtraApi:function(cfg){saveExtraApi(cfg||{});return getExtraApi();},
-            requestNotificationPermission:requestNotificationPermission,
-        };
+    // Update our badge
+    updateBadge();
+}
 
-        console.log('[GuildQuest v6.0] \u2694\uFE0F Extension ready');
-    }catch(err){console.error('[GQ6] Init error:',err);}
-});
+// ──────────────────────────────────────────────
+//  File upload
+// ──────────────────────────────────────────────
+async function onFilesChosen(e) {
+    const files = Array.from(e.target.files);
+    if (!files.length) return;
+
+    const gallery = getGallery(_modalKey);
+    for (const file of files) {
+        const src = await fileToDataURL(file);
+        gallery.avatars.push({ src, label: file.name.replace(/\.[^.]+$/, "") });
+    }
+    if (gallery.activeIdx < 0 && gallery.avatars.length > 0) {
+        gallery.activeIdx = 0;
+    }
+    _viewIdx = gallery.avatars.length - 1;
+    save();
+    renderModal();
+    updateBadge();
+    e.target.value = "";
+}
+
+function fileToDataURL(file) {
+    return new Promise((res, rej) => {
+        const r = new FileReader();
+        r.onload = () => res(r.result);
+        r.onerror = () => rej(r.error);
+        r.readAsDataURL(file);
+    });
+}
+
+// ──────────────────────────────────────────────
+//  Badge on the in-page avatar
+// ──────────────────────────────────────────────
+function updateBadge() {
+    const key = currentCharKey();
+    const gallery = store[key];
+    const count = gallery?.avatars?.length || 0;
+
+    document.querySelectorAll(".ag-avatar-badge").forEach(b => {
+        b.textContent = count > 0 ? `🖼 ${count}` : "🖼";
+    });
+
+    // Also restore active avatar src if we have one
+    if (key && gallery?.activeIdx >= 0 && gallery.avatars.length) {
+        const src = gallery.avatars[gallery.activeIdx].src;
+        applyAvatarToDOM(src);
+    }
+}
+
+// ──────────────────────────────────────────────
+//  Inject clickable badge onto avatar elements
+// ──────────────────────────────────────────────
+function wrapAvatarElement(imgEl) {
+    if (!imgEl || imgEl.closest(".ag-avatar-wrap")) return; // already wrapped
+    const parent = imgEl.parentElement;
+    if (!parent) return;
+
+    const wrap = document.createElement("div");
+    wrap.className = "ag-avatar-wrap";
+    wrap.title = "Открыть галерею аватарок";
+
+    const badge = document.createElement("span");
+    badge.className = "ag-avatar-badge";
+    badge.textContent = "🖼";
+
+    parent.insertBefore(wrap, imgEl);
+    wrap.appendChild(imgEl);
+    wrap.appendChild(badge);
+
+    wrap.addEventListener("click", e => {
+        e.stopPropagation();
+        openModal(currentCharKey());
+    });
+}
+
+function injectBadges() {
+    // Main chat avatar (right panel character portrait)
+    const targets = [
+        "#ai_profile_pic",
+        "#character_avatar_block img",
+        ".right-nav-panel .avatar img",
+    ];
+    targets.forEach(sel => {
+        document.querySelectorAll(sel).forEach(img => wrapAvatarElement(img));
+    });
+
+    updateBadge();
+}
+
+// ──────────────────────────────────────────────
+//  Event hooks
+// ──────────────────────────────────────────────
+function onCharChanged() {
+    setTimeout(() => {
+        injectBadges();
+        updateBadge();
+    }, 400);
+}
+
+// ──────────────────────────────────────────────
+//  Init
+// ──────────────────────────────────────────────
+(function init() {
+    buildModal();
+    // Hook into ST events
+    try {
+        eventSource.on(event_types.CHAT_CHANGED,         onCharChanged);
+        eventSource.on(event_types.CHARACTER_SELECTED,   onCharChanged);
+        eventSource.on(event_types.SETTINGS_UPDATED,     onCharChanged);
+    } catch (err) {
+        console.warn("[AvatarGallery] Could not bind ST events:", err);
+    }
+
+    // Inject on load + watch DOM for avatar elements appearing
+    setTimeout(injectBadges, 800);
+    setTimeout(injectBadges, 2000);
+
+    const observer = new MutationObserver(() => injectBadges());
+    observer.observe(document.body, { childList: true, subtree: true });
+
+    console.log("[AvatarGallery] Extension loaded ✓");
+})();
