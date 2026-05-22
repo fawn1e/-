@@ -73,8 +73,12 @@ const SCRUB_RE = [
     /&lt;gq_fail&gt;[\s\S]*?&lt;\/gq_fail&gt;/gi,
     /&lt;gq_reward&gt;[\s\S]*?&lt;\/gq_reward&gt;/gi,
     /&lt;gq_rep&gt;[\s\S]*?&lt;\/gq_rep&gt;/gi,
-    // Raw JSON guild board that leaks as plain text
-    /\{"guild"\s*:\s*"[^"]*"\s*,\s*"(?:loc|rank|quests)"[\s\S]{10,800}?"quests"\s*:\s*\[[\s\S]*?\]\s*\}/gi,
+    // Raw JSON guild board that leaks as plain text (various spacings)
+    /\{\s*"guild"\s*:\s*"[^"]*"\s*,\s*"(?:loc|rank|quests)"[\s\S]{10,4000}?"quests"\s*:\s*\[[\s\S]*?\]\s*\}/gi,
+    // Broader: any object starting with "guild" key followed by "quests" array
+    /\{\s*(?:\u{fffd}\s*)?[""]guild[""]\s*:[\s\S]{5,5000}?[""]quests[""]\s*:\s*\[[\s\S]*?\]\s*\}/giu,
+    // Escaped unicode markers (\ufffd or replacement chars) mixed with JSON
+    /\{\s*\ufffd[^}]{10,5000}quests[^}]{10,5000}\}/gi,
 ];
 // Raw bracket markup that leaks into chat
 const SCRUB_BRACKET = [
@@ -91,6 +95,7 @@ let _ui = null;
 let _extraApi = null;
 let _wantBoard = false, _injected = false;
 let _lastBoardNoticeSig = '';
+let _chatId = '';  // per-chat scoping
 
 // ── Helpers ──
 function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
@@ -99,6 +104,25 @@ function pGold(s){var m=String(s||'').match(/(\d+)/);return m?parseInt(m[1],10):
 function jLoad(k,d){try{var v=JSON.parse(localStorage.getItem(k));return v!=null?v:d;}catch(e){return d;}}
 function jSave(k,v){try{localStorage.setItem(k,JSON.stringify(v));}catch(e){}}
 function tryJSON(s){try{return JSON.parse(s);}catch(e){return null;}}
+
+// ── Chat ID for per-chat scoping ──
+function getChatId(){
+    try{
+        var ctx=null;
+        if(typeof SillyTavern!=='undefined'&&SillyTavern.getContext)ctx=SillyTavern.getContext();
+        else if(typeof getContext==='function')ctx=getContext();
+        if(ctx){
+            if(ctx.chatId)return String(ctx.chatId);
+            if(ctx.characterId!=null)return 'char_'+ctx.characterId;
+            if(ctx.characters&&ctx.characters.length&&ctx.character_id!=null)return 'char_'+ctx.character_id;
+        }
+    }catch(e){}
+    return '';
+}
+function chatKey(base){
+    var id=_chatId||getChatId();
+    return id?(base+'_'+id):base;
+}
 
 // ── Profile ──
 function defProfile(){return{name:'Авантюрист',rank:'F',gold:0,completed:0,failed:0,byType:{},history:[],reputation:{},titles:[],activeTitle:'',achievements:[]};}
@@ -111,7 +135,7 @@ function getProfile(){
 function saveProfile(p){jSave(KEY_PROFILE,p);}
 function calcRank(p){var r='F';for(var i=0;i<RANKS.length;i++)if(p.completed>=RANK_TH[RANKS[i]])r=RANKS[i];return r;}
 function defUI(){return{fab:{x:null,y:null},panel:{x:null,y:null,w:null,h:null}};}
-function defExtraApi(){return{enabled:false,url:'',key:'',model:'',proxy:'',maxTokens:800,headers:{}};}
+function defExtraApi(){return{enabled:false,url:'',key:'',model:'',maxTokens:800,headers:{}};}
 const EXTRA_MODELS = [
     {id:'gpt-4o-mini',name:'GPT-4o Mini'},
     {id:'gpt-4o',name:'GPT-4o'},
@@ -130,10 +154,9 @@ function normExtraApi(c){
     var d=defExtraApi();
     if(!c||typeof c!=='object')return d;
     d.enabled=!!c.enabled;
-    d.url=String(c.url||'').trim();
+    d.url=String(c.url||c.proxy||'').trim();
     d.key=String(c.key||'').trim();
     d.model=String(c.model||'').trim();
-    d.proxy=String(c.proxy||'').trim();
     d.maxTokens=typeof c.maxTokens==='number'?c.maxTokens:800;
     d.headers=(c.headers&&typeof c.headers==='object')?c.headers:{};
     return d;
@@ -161,17 +184,18 @@ function normUI(u){
     return d;
 }
 function loadState(){
-    _board=jLoad(KEY_BOARD,null);
-    _active=jLoad(KEY_ACTIVE,null);
-    _completed=jLoad(KEY_COMPLETED,{});
+    _chatId=getChatId();
+    _board=jLoad(chatKey(KEY_BOARD),null);
+    _active=jLoad(chatKey(KEY_ACTIVE),null);
+    _completed=jLoad(chatKey(KEY_COMPLETED),{});
     if(!_completed||typeof _completed!=='object')_completed={};
     _ui=normUI(jLoad(KEY_UI,defUI()));
     applyCompletedFilter();
 }
 function saveState(){
-    if(_board)jSave(KEY_BOARD,_board);else localStorage.removeItem(KEY_BOARD);
-    if(_active)jSave(KEY_ACTIVE,_active);else localStorage.removeItem(KEY_ACTIVE);
-    if(_completed&&Object.keys(_completed).length)jSave(KEY_COMPLETED,_completed);else localStorage.removeItem(KEY_COMPLETED);
+    if(_board)jSave(chatKey(KEY_BOARD),_board);else localStorage.removeItem(chatKey(KEY_BOARD));
+    if(_active)jSave(chatKey(KEY_ACTIVE),_active);else localStorage.removeItem(chatKey(KEY_ACTIVE));
+    if(_completed&&Object.keys(_completed).length)jSave(chatKey(KEY_COMPLETED),_completed);else localStorage.removeItem(chatKey(KEY_COMPLETED));
     if(_ui)jSave(KEY_UI,_ui);else localStorage.removeItem(KEY_UI);
 }
 
@@ -196,8 +220,8 @@ function applyCompletedFilter(){
 function vpW(){return Math.max(document.documentElement.clientWidth||0,window.innerWidth||0);}
 function vpH(){return Math.max(document.documentElement.clientHeight||0,window.innerHeight||0);}
 function clamp(v,min,max){return Math.max(min,Math.min(max,v));}
-function panelMinW(){return vpW()<=768?280:340;}
-function panelMinH(){return vpW()<=768?260:300;}
+function panelMinW(){return vpW()<=768?260:320;}
+function panelMinH(){return vpW()<=768?240:280;}
 function panelMaxW(){return Math.max(panelMinW(),vpW()-12);}
 function panelMaxH(){return Math.max(panelMinH(),vpH()-12);}
 
@@ -292,7 +316,7 @@ function parseDoneListFromAny(raw){
 async function fetchExtraApi(payload){
     var cfg=getExtraApi();
     if(!cfg.enabled||!cfg.url)return null;
-    var endpoint=cfg.proxy?cfg.proxy:cfg.url;
+    var endpoint=cfg.url;
     var headers={'Content-Type':'application/json'};
     if(cfg.key){headers.Authorization='Bearer '+cfg.key;headers['X-API-Key']=cfg.key;}
     for(var hk in cfg.headers){if(cfg.headers[hk]!=null)headers[String(hk)]=String(cfg.headers[hk]);}
@@ -416,6 +440,10 @@ function scrubChat(){
         for(var r=0;r<SCRUB_RE.length;r++) h=h.replace(SCRUB_RE[r],mark);
         for(var r=0;r<SCRUB_BRACKET.length;r++) h=h.replace(SCRUB_BRACKET[r],mark);
         h=h.replace(/```(?:json|xml|txt)?\s*(?:<guild_board>[\s\S]*?<\/guild_board>|\[Guild\|[\s\S]*?\])\s*```/gi,function(){touched=true;return '';});
+        // Catch any remaining raw JSON-like guild data with various quote styles
+        h=h.replace(/\{\s*(?:&quot;|\u201c|\u201d|"|&#34;|[\ufffd])\s*(?:guild|title|quests)[\s\S]{20,5000}?(?:quests|objs)\s*(?:&quot;|\u201c|\u201d|"|&#34;|[\ufffd])\s*:\s*\[[\s\S]*?\]\s*\}/gi,function(){touched=true;return '';});
+        // Catch raw text blocks that look like JSON quest dumps (with replacement char)
+        h=h.replace(/\{\s*\ufffd\s*(?:&quot;|"|[\u201c\u201d])[\s\S]{20,5000}?\]\s*\}(?:\s*,?\s*\{[\s\S]{20,5000}?\]\s*\})*/gi,function(){touched=true;return '';});
         // Clean empty paragraphs left behind
         h=h.replace(/<p>\s*<\/p>/gi,'');
         if(touched&&h.indexOf('gq-tech-hidden')===-1)h=marker+h;
@@ -846,11 +874,33 @@ function renderAchs(){
     }
 }
 
+// ── Fetch models from API ──
+async function fetchModelsFromApi(){
+    var cfg=getExtraApi();
+    if(!cfg.url)return [];
+    var baseUrl=cfg.url.replace(/\/chat\/completions\/?$/,'').replace(/\/completions\/?$/,'').replace(/\/+$/,'');
+    var modelsUrl=baseUrl+'/models';
+    var headers={};
+    if(cfg.key){headers.Authorization='Bearer '+cfg.key;headers['X-API-Key']=cfg.key;}
+    try{
+        var res=await fetch(modelsUrl,{method:'GET',headers:headers});
+        if(!res.ok)return [];
+        var json=await res.json();
+        if(json&&Array.isArray(json.data)){
+            return json.data.map(function(m){return{id:m.id||'',name:m.id||''};}).filter(function(m){return m.id;});
+        }
+        if(Array.isArray(json)){
+            return json.map(function(m){return{id:typeof m==='string'?m:m.id||'',name:typeof m==='string'?m:m.id||''};}).filter(function(m){return m.id;});
+        }
+    }catch(e){}
+    return [];
+}
+
 // ── Render: Settings (Extra API) ──
 function renderSettings(){
     var el=document.getElementById('gq-v-settings');if(!el)return;
     var cfg=getExtraApi();
-    var modelOpts='';
+    var modelOpts='<option value="">— Выберите модель —</option>';
     var foundModel=false;
     for(var i=0;i<EXTRA_MODELS.length;i++){
         var m=EXTRA_MODELS[i];
@@ -858,53 +908,41 @@ function renderSettings(){
         if(sel)foundModel=true;
         modelOpts+='<option value="'+esc(m.id)+'"'+(sel?' selected':'')+'>'+esc(m.name)+'</option>';
     }
-    // If custom model not in list
     if(cfg.model&&!foundModel){
         modelOpts+='<option value="'+esc(cfg.model)+'" selected>'+esc(cfg.model)+' (своя)</option>';
     }
 
     el.innerHTML='<div class="gq-settings">'
-        +'<div class="gq-section-title"><i class="fa-solid fa-robot"></i> Extra API — Внешний ИИ</div>'
-        +'<div class="gq-set-desc">Подключи внешний ИИ для генерации заданий и автоматической проверки целей. Модель читает минимум контекста для экономии токенов.</div>'
+        +'<div class="gq-section-title"><i class="fa-solid fa-robot"></i> Extra API</div>'
         +'<label class="gq-set-toggle">'
         +'<input type="checkbox" id="gq-set-enabled"'+(cfg.enabled?' checked':'')+'>'
         +'<span class="gq-set-toggle-label">Включить Extra API</span>'
         +'</label>'
         +'<div class="gq-set-group">'
-        +'<label class="gq-set-label">API URL (эндпоинт)</label>'
+        +'<label class="gq-set-label">URL (эндпоинт или прокси)</label>'
         +'<input type="text" class="gq-set-input" id="gq-set-url" value="'+esc(cfg.url)+'" placeholder="https://api.openai.com/v1/chat/completions">'
-        +'</div>'
-        +'<div class="gq-set-group">'
-        +'<label class="gq-set-label">Прокси (опционально)</label>'
-        +'<input type="text" class="gq-set-input" id="gq-set-proxy" value="'+esc(cfg.proxy)+'" placeholder="https://my-proxy.example.com/v1">'
-        +'<span class="gq-set-hint">Если указан, запросы пойдут через прокси вместо прямого URL</span>'
         +'</div>'
         +'<div class="gq-set-group">'
         +'<label class="gq-set-label">API Ключ</label>'
         +'<input type="password" class="gq-set-input" id="gq-set-key" value="'+esc(cfg.key)+'" placeholder="sk-...">'
         +'</div>'
         +'<div class="gq-set-group">'
-        +'<label class="gq-set-label">Модель ИИ</label>'
+        +'<label class="gq-set-label">Модель</label>'
+        +'<div class="gq-set-model-row">'
         +'<select class="gq-set-input" id="gq-set-model">'+modelOpts+'</select>'
+        +'<button class="gq-btn-fetch-models" id="gq-fetch-models" title="Загрузить модели с API"><i class="fa-solid fa-rotate"></i></button>'
+        +'</div>'
         +'</div>'
         +'<div class="gq-set-group" id="gq-set-custom-model-wrap" style="display:'+(cfg.model==='custom'||(!foundModel&&cfg.model)?'block':'none')+'">'
-        +'<label class="gq-set-label">Имя модели (вручную)</label>'
-        +'<input type="text" class="gq-set-input" id="gq-set-custom-model" value="'+esc(cfg.model==='custom'?'':cfg.model)+'" placeholder="my-model-name">'
+        +'<input type="text" class="gq-set-input" id="gq-set-custom-model" value="'+esc(cfg.model==='custom'?'':cfg.model)+'" placeholder="Имя модели">'
         +'</div>'
         +'<div class="gq-set-group">'
-        +'<label class="gq-set-label">Макс. токенов ответа</label>'
+        +'<label class="gq-set-label">Макс. токенов</label>'
         +'<input type="number" class="gq-set-input" id="gq-set-tokens" value="'+(cfg.maxTokens||800)+'" min="100" max="4000" step="100">'
-        +'<span class="gq-set-hint">Чем меньше — тем экономнее. 800 достаточно для заданий.</span>'
-        +'</div>'
-        +'<div class="gq-section-title" style="margin-top:14px"><i class="fa-solid fa-list-check"></i> Возможности ИИ</div>'
-        +'<div class="gq-set-features">'
-        +'<label class="gq-set-toggle"><input type="checkbox" checked disabled><span class="gq-set-toggle-label">Генерация заданий на доску</span></label>'
-        +'<label class="gq-set-toggle"><input type="checkbox" checked disabled><span class="gq-set-toggle-label">Автопроверка целей (чекбоксы)</span></label>'
-        +'<label class="gq-set-toggle"><input type="checkbox" checked disabled><span class="gq-set-toggle-label">Экономный режим (мин. контекст)</span></label>'
         +'</div>'
         +'<div class="gq-set-actions">'
         +'<button class="gq-btn gq-btn-save" id="gq-set-save"><i class="fa-solid fa-floppy-disk"></i> Сохранить</button>'
-        +'<button class="gq-btn gq-btn-test" id="gq-set-test"><i class="fa-solid fa-vial"></i> Тест соединения</button>'
+        +'<button class="gq-btn gq-btn-test" id="gq-set-test"><i class="fa-solid fa-vial"></i> Тест</button>'
         +'</div>'
         +'<div id="gq-set-status" class="gq-set-status"></div>'
         +'</div>';
@@ -916,6 +954,40 @@ function renderSettings(){
         if(customWrap)customWrap.style.display=(selModel.value==='custom')?'block':'none';
     });
 
+    // Fetch models from API
+    var fetchBtn=document.getElementById('gq-fetch-models');
+    if(fetchBtn)fetchBtn.addEventListener('click',async function(){
+        var st=document.getElementById('gq-set-status');
+        if(st){st.textContent='⏳ Загрузка моделей...';st.className='gq-set-status';}
+        fetchBtn.disabled=true;
+        // Save URL/key first
+        var urlVal=(document.getElementById('gq-set-url').value||'').trim();
+        var keyVal=(document.getElementById('gq-set-key').value||'').trim();
+        var tmpCfg=normExtraApi({enabled:true,url:urlVal,key:keyVal,model:cfg.model,maxTokens:cfg.maxTokens});
+        _extraApi=tmpCfg;
+        var models=await fetchModelsFromApi();
+        fetchBtn.disabled=false;
+        if(models.length){
+            var sel=document.getElementById('gq-set-model');
+            if(sel){
+                var curVal=sel.value;
+                sel.innerHTML='<option value="">— Выберите модель —</option>';
+                for(var i=0;i<models.length;i++){
+                    var opt=document.createElement('option');
+                    opt.value=models[i].id;opt.textContent=models[i].name;
+                    if(models[i].id===curVal||models[i].id===cfg.model)opt.selected=true;
+                    sel.appendChild(opt);
+                }
+                var customOpt=document.createElement('option');
+                customOpt.value='custom';customOpt.textContent='Своя модель (ввести вручную)';
+                sel.appendChild(customOpt);
+            }
+            if(st){st.textContent='✓ Загружено моделей: '+models.length;st.className='gq-set-status gq-set-ok';}
+        }else{
+            if(st){st.textContent='✗ Не удалось загрузить модели';st.className='gq-set-status gq-set-err';}
+        }
+    });
+
     // Save
     var saveBtn=document.getElementById('gq-set-save');
     if(saveBtn)saveBtn.addEventListener('click',function(){
@@ -925,36 +997,34 @@ function renderSettings(){
         var newCfg={
             enabled:document.getElementById('gq-set-enabled').checked,
             url:(document.getElementById('gq-set-url').value||'').trim(),
-            proxy:(document.getElementById('gq-set-proxy').value||'').trim(),
             key:(document.getElementById('gq-set-key').value||'').trim(),
             model:model,
             maxTokens:parseInt(document.getElementById('gq-set-tokens').value,10)||800,
             headers:cfg.headers
         };
         saveExtraApi(newCfg);
-        toast('\u2713 Extra API настройки сохранены','success');
+        toast('\u2713 Настройки сохранены','success');
         var st=document.getElementById('gq-set-status');
         if(st){st.textContent='\u2713 Сохранено';st.className='gq-set-status gq-set-ok';}
     });
 
-    // Test
+    // Test connection
     var testBtn=document.getElementById('gq-set-test');
     if(testBtn)testBtn.addEventListener('click',async function(){
         var st=document.getElementById('gq-set-status');
-        if(st){st.textContent='\u23F3 Проверка...';st.className='gq-set-status';}
-        // Save first
+        if(st){st.textContent='⏳ Проверка подключения...';st.className='gq-set-status';}
         saveBtn.click();
         var cfg2=getExtraApi();
-        if(!cfg2.url){if(st){st.textContent='\u2717 Укажите URL';st.className='gq-set-status gq-set-err';}return;}
+        if(!cfg2.url){if(st){st.textContent='✗ Укажите URL';st.className='gq-set-status gq-set-err';}return;}
         try{
             var result=await fetchExtraApi({task:'ping',test:true});
             if(result!==null){
-                if(st){st.textContent='\u2713 Соединение успешно!';st.className='gq-set-status gq-set-ok';}
+                if(st){st.textContent='✓ Подключено! Соединение установлено.';st.className='gq-set-status gq-set-ok';}
             }else{
-                if(st){st.textContent='\u2717 Нет ответа или ошибка';st.className='gq-set-status gq-set-err';}
+                if(st){st.textContent='✗ Не подключено. Нет ответа от сервера.';st.className='gq-set-status gq-set-err';}
             }
         }catch(e){
-            if(st){st.textContent='\u2717 Ошибка: '+String(e.message||e);st.className='gq-set-status gq-set-err';}
+            if(st){st.textContent='✗ Не подключено: '+String(e.message||e);st.className='gq-set-status gq-set-err';}
         }
     });
 }
@@ -998,7 +1068,7 @@ function doComplete(autoTurnIn){
 var SYSTEM_PROMPT = '[System Note: \u0418\u0433\u0440\u043E\u043A \u043F\u043E\u0434\u043E\u0448\u0451\u043B \u043A \u0434\u043E\u0441\u043A\u0435 \u043E\u0431\u044A\u044F\u0432\u043B\u0435\u043D\u0438\u0439 \u0433\u0438\u043B\u044C\u0434\u0438\u0438. \u0412 \u0421\u0410\u041C\u041E\u041C \u041D\u0410\u0427\u0410\u041B\u0415 \u043E\u0442\u0432\u0435\u0442\u0430 \u0432\u044B\u0432\u0435\u0434\u0438 \u0431\u043B\u043E\u043A \u0421\u0422\u0420\u041E\u0413\u041E \u0432 \u044D\u0442\u043E\u043C \u0444\u043E\u0440\u043C\u0430\u0442\u0435:\n\n<guild_board>\n{"guild":"\u041D\u0430\u0437\u0432\u0430\u043D\u0438\u0435\u0413\u0438\u043B\u044C\u0434\u0438\u0438","loc":"\u041C\u0435\u0441\u0442\u043E","rank":"\u0420\u0430\u043D\u0433\u0418\u0433\u0440\u043E\u043A\u0430","quests":[\n{"title":"\u041D\u0430\u0437\u0432\u0430\u043D\u0438\u0435","desc":"\u041E\u043F\u0438\u0441\u0430\u043D\u0438\u0435","diff":"F","type":"GUILD","reward":"50\u0437\u043C","client":"\u0418\u043C\u044F","deadline":"2 \u0434\u043D\u044F","location":"\u041B\u043E\u043A\u0430\u0446\u0438\u044F","storyLink":false,"objs":["\u0426\u0435\u043B\u044C1","\u0426\u0435\u043B\u044C2"]}\n]}\n</guild_board>\n\n\u041F\u0440\u0430\u0432\u0438\u043B\u0430:\n- \u0420\u0430\u043D\u0433/\u0421\u043B\u043E\u0436\u043D\u043E\u0441\u0442\u044C: F/E/D/C/B/A/S/SS/SSS\n- 3-4 \u0437\u0430\u0434\u0430\u043D\u0438\u044F, \u0441\u043E\u043E\u0442\u0432\u0435\u0442\u0441\u0442\u0432\u0443\u044E\u0449\u0438\u0445 \u0440\u0430\u043D\u0433\u0443 \u0438\u0433\u0440\u043E\u043A\u0430 (\u00B11 \u0440\u0430\u043D\u0433)\n- \u041D\u0430\u0433\u0440\u0430\u0434\u0430: F=30-80\u0437\u043C, E=80-150\u0437\u043C, D=150-300\u0437\u043C, C=300-600\u0437\u043C, B=600-1500\u0437\u043C, A=1500-5000\u0437\u043C, S=5000+\u0437\u043C\n- \u0422\u0438\u043F\u044B \u0437\u0430\u0434\u0430\u043D\u0438\u0439 (type): STORY, GUILD, SIDE, URGENT, HUNT, ESCORT, DUNGEON, INVESTIGATE, SPECIAL, RAID, DAILY\n- \u041E\u0434\u043D\u043E \u0438\u0437 \u0437\u0430\u0434\u0430\u043D\u0438\u0439 \u043C\u043E\u0436\u0435\u0442 \u0431\u044B\u0442\u044C STORY (\u0441\u0432\u044F\u0437\u0430\u043D\u043E \u0441 \u0441\u044E\u0436\u0435\u0442\u043E\u043C RP, storyLink:true)\n- \u0421\u0440\u043E\u0447\u043D\u044B\u0435 (URGENT) \u0434\u0430\u044E\u0442 x1.5 \u043D\u0430\u0433\u0440\u0430\u0434\u0443\n- objs: 2-4 \u0446\u0435\u043B\u0438 \u043A\u0430\u043A \u043C\u0430\u0441\u0441\u0438\u0432 \u0441\u0442\u0440\u043E\u043A\n- \u0417\u0430\u0434\u0430\u043D\u0438\u044F \u0434\u043E\u043B\u0436\u043D\u044B \u0431\u044B\u0442\u044C \u0440\u0430\u0437\u043D\u043E\u043E\u0431\u0440\u0430\u0437\u043D\u044B\u043C\u0438 \u0438 \u0438\u043D\u0442\u0435\u0440\u0435\u0441\u043D\u044B\u043C\u0438, \u043A\u0430\u043A \u0432 \u0430\u043D\u0438\u043C\u0435/\u043C\u0430\u043D\u0445\u0432\u0435 \u043F\u0440\u043E \u0433\u0438\u043B\u044C\u0434\u0438\u0438 \u0430\u0432\u0430\u043D\u0442\u044E\u0440\u0438\u0441\u0442\u043E\u0432\n- JSON \u0434\u043E\u043B\u0436\u0435\u043D \u0431\u044B\u0442\u044C \u0432\u0430\u043B\u0438\u0434\u043D\u044B\u043C\n\n\u041A\u043E\u0433\u0434\u0430 \u0438\u0433\u0440\u043E\u043A \u0432\u044B\u043F\u043E\u043B\u043D\u044F\u0435\u0442 \u0446\u0435\u043B\u044C \u0430\u043A\u0442\u0438\u0432\u043D\u043E\u0433\u043E \u0437\u0430\u0434\u0430\u043D\u0438\u044F, \u043F\u043E\u043C\u0435\u0442\u044C:\n<gq_done>\u0442\u043E\u0447\u043D\u044B\u0439 \u0442\u0435\u043A\u0441\u0442 \u0446\u0435\u043B\u0438</gq_done>\n\n\u041F\u043E\u0441\u043B\u0435 </guild_board> \u2014 \u043E\u0431\u044B\u0447\u043D\u043E\u0435 \u043F\u043E\u0432\u0435\u0441\u0442\u0432\u043E\u0432\u0430\u043D\u0438\u0435.]';
 
 function injectPrompt(){
-    var prompt=SYSTEM_PROMPT+'\n\n[Важно: не используй markdown-код-блоки ``` и не показывай служебные теги в обычном тексте.]';
+    var prompt=SYSTEM_PROMPT+'\n\n[Важно: не используй markdown-код-блоки ``` и не показывай служебные теги в обычном тексте. Блок <guild_board>...</guild_board> должен быть СКРЫТ от пользователя — не выводи JSON напрямую в сообщении.]';
     var p=getProfile();
     var recent=(p.history||[]).slice(-20).map(function(h){return String(h.title||'').trim();}).filter(Boolean);
     if(recent.length){
@@ -1076,6 +1146,7 @@ jQuery(function(){
         eventSource.on(event_types.MESSAGE_RECEIVED,function(){setTimeout(processNew,500);});
         eventSource.on(event_types.MESSAGE_SWIPED,function(){setTimeout(function(){scanMessages();processNew();},500);});
         eventSource.on(event_types.CHAT_CHANGED,function(){
+            _chatId=getChatId();
             _board=null;loadState();_wantBoard=false;
             if(_injected)clearPrompt();
             _lastBoardNoticeSig='';
